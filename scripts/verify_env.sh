@@ -137,7 +137,7 @@ cat <<'MD'
 | SAM 2.1 (hiera-large) | ~0.9 GB |
 | Detector + ReID + face embeddings | ~1.5 GB |
 | **Install subtotal** | **~24 GB** |
-| Intermediates for 30 min @ 16 fps 832x480 (depth + masks + chunks) | ~45-70 GB |
+| Intermediates, 30-min reference workload @ 16 fps 832x480 | ~45-70 GB |
 | Restored 480p master + deliverables | ~15-25 GB |
 | **Peak total** | **~85-120 GB** |
 MD

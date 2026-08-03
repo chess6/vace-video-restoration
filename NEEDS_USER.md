@@ -102,16 +102,16 @@ contributing.
 
 ## 6. Approve the full run  — **explicit approval required**
 
-Nothing processes the full 30 minutes until you run:
+Nothing processes the whole video until you run:
 
 ```bash
 scripts/run_full.sh --confirm-full-run
 ```
 
 Without the flag it prints the measured time and disk estimates and exits.
-**Read those estimates first** — see `reports/benchmark.json`. On this GPU the
-full job is measured in days, not hours, which is a genuine argument for doing
-production on the cloud 14B profile instead.
+**Read those estimates first** — see `reports/benchmark.json`. On this GPU a
+long-form job is measured in days, not hours, which is a genuine argument for
+doing production on the cloud 14B profile instead.
 
 ---
 
@@ -126,7 +126,7 @@ cp RealESRGAN_x2plus.pth ComfyUI/models/upscale_models/
 venv/bin/python scripts/compare_upscalers.py --target 720p
 ```
 
-It runs strictly on **already-restored** output, never on the raw 240p source.
+It runs strictly on **already-restored** output, never on the raw source.
 
 **Free some RAM for long runs.** This machine has 15 GiB total and the desktop
 session was using a large share of it at inspection time. Closing Firefox and

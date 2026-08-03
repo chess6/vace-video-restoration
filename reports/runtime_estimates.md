@@ -22,11 +22,12 @@ the fixed and marginal costs cleanly:
 
 ## Step count vs total runtime
 
-A 30-minute source at 16 fps is 28 800 frames. With 81-frame chunks and 8 frames
+Worked for a **30-minute reference workload** at 16 fps = 28 800 frames; scale
+linearly for any other duration. With 81-frame chunks and 8 frames
 of overlap that is **395 chunks** and 31 995 generated frames (11 % overlap
 overhead).
 
-| Steps | Per chunk | s / frame | Full 30 min |
+| Steps | Per chunk | s / frame | Reference workload |
 |---:|---:|---:|---:|
 | 10 | 7.0 min | 5.22 | **46 h** |
 | 15 | 10.1 min | 7.51 | **67 h** |
@@ -36,8 +37,8 @@ overhead).
 
 ## What this means
 
-**The full 30 minutes is a multi-day job on this GPU: about 4.5 days of
-continuous compute at the baseline 25 steps.** That is not a configuration
+**At that scale it is a multi-day job on this GPU: about 4.5 days of continuous
+compute at the baseline 25 steps.** That is not a configuration
 mistake, and it is not fixable by memory tuning — the GPU sits at 100 %
 utilisation throughout, so it is genuinely compute-bound.
 
@@ -69,7 +70,7 @@ running conditional and unconditional passes every step.
 
 ### Reducing scope is also legitimate
 
-395 chunks assumes restoring all 30 minutes. If only the shots where the main
+395 chunks assumes restoring the whole reference workload. If only the shots where the main
 figure is prominent actually matter, `intermediate/chunk_manifest.json` can be
 filtered and the rest passed through untouched — `assemble.py` already fills
 unrestored ranges from the normalized source and preserves total duration.

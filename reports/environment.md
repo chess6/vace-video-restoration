@@ -1,6 +1,6 @@
 # Environment Report
 
-Generated: 2026-08-03T15:32:47-07:00
+Generated: 2026-08-03T16:26:54-07:00
 Project root: `/home/thomas/Dev/upscaler/vace-video-restoration`
 
 ## Summary table
@@ -10,17 +10,17 @@ Project root: `/home/thomas/Dev/upscaler/vace-video-restoration`
 | Ubuntu | `Ubuntu 24.04.4 LTS` | OK |
 | Kernel | `6.8.0-136-generic` | OK |
 | CPU | `AMD Ryzen 9 5900X 12-Core Processor` | OK |
-| RAM total / available | `15 GiB / 3 GiB` | OK |
+| RAM total / available | `15 GiB / 7 GiB` | OK |
 | Swap | `15 GiB` | OK |
 | GPU | `NVIDIA GeForce RTX 3060` | OK |
-| VRAM total / free | `12288 MiB / 3991 MiB` | OK |
+| VRAM total / free | `12288 MiB / 10416 MiB` | OK |
 | NVIDIA driver | `580.173.02` | OK |
 | Compute capability | `8.6` | OK |
-| Free disk at project | `590 GiB` | OK |
-| git | `unknown option: -version` | OK |
+| Free disk at project | `587 GiB` | OK |
+| git | `git version 2.43.0` | OK |
 | ffmpeg | `ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FF` | OK |
 | ffprobe | `ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023 the F` | OK |
-| curl | `curl: (2) no URL specified` | OK |
+| curl | `curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0 OpenSSL/3.0.1` | OK |
 | venv python | `Python 3.12.3` | OK |
 | ComfyUI commit | `e377e263049f9338b4d12a3dd417b36ae62948ff` | OK |
 | ComfyUI tag | `v0.30.0` | OK |
@@ -71,7 +71,7 @@ Project root: `/home/thomas/Dev/upscaler/vace-video-restoration`
 | SAM 2.1 (hiera-large) | ~0.9 GB |
 | Detector + ReID + face embeddings | ~1.5 GB |
 | **Install subtotal** | **~24 GB** |
-| Intermediates for 30 min @ 16 fps 832x480 (depth + masks + chunks) | ~45-70 GB |
+| Intermediates, 30-min reference workload @ 16 fps 832x480 | ~45-70 GB |
 | Restored 480p master + deliverables | ~15-25 GB |
 | **Peak total** | **~85-120 GB** |
 

@@ -106,6 +106,27 @@ else
 fi
 
 echo
+echo "=== 3b. No COMMIT MESSAGE mentions an input filename ==="
+# Tracked file contents are not the only thing that gets published. Commit
+# messages, author names and branch names travel with the repository too, and
+# are far harder to redact after the fact.
+if [ -z "${WORDS:-}" ] || ! git rev-parse HEAD >/dev/null 2>&1; then
+  echo "  (nothing to check)"
+else
+  found=0
+  meta=$(git log --all --format='%B%n%an%n%ae%n%s' 2>/dev/null;
+         git for-each-ref --format='%(refname)' 2>/dev/null)
+  while read -r w; do
+    [ -z "$w" ] && continue
+    if printf '%s' "$meta" | grep -qiE "\b${w}\b"; then
+      echo "  VIOLATION: token '${w}' appears in a commit message, author field or ref name"
+      found=1
+    fi
+  done <<< "$WORDS"
+  [ $found -eq 1 ] && rc=1 || echo "  OK: commit messages, authors and refs are clean"
+fi
+
+echo
 echo "=== 4. No media-derived reports tracked ==="
 hits=$(tracked | grep -E '^reports/(source_info|tracking_report|assembly|upscaler_comparison)' || true)
 if [ -n "$hits" ]; then echo "$hits" | sed 's/^/  VIOLATION: /'; rc=1; else echo "  OK"; fi

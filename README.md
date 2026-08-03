@@ -1,14 +1,15 @@
 # VACE reference-conditioned video restoration
 
-Reference-conditioned generative restoration of a ~30 minute 240p video using
-**Wan2.1-VACE-1.3B** inside **ComfyUI**, driven by depth control, a tracked
+Reference-conditioned generative restoration of long-form, low-resolution video
+using **Wan2.1-VACE-1.3B** inside **ComfyUI**, driven by depth control, a tracked
 full-figure mask and a reference sheet built from higher-quality stills of the
 main figure.
 
-This is deliberately **not** conventional super-resolution. Video2X + Real-ESRGAN
-on the raw source was already tried and rejected. Real-ESRGAN appears here only as
-an optional *final* resize of already-restored output, and only after being
-compared against a plain Lanczos resize.
+This is deliberately **not** conventional super-resolution. The premise is that
+detail-hallucinating upscalers applied directly to a degraded source cannot
+recover identity, because the information is not there to recover. Real-ESRGAN
+appears here only as an optional *final* resize of already-restored output, and
+only after being compared against a plain Lanczos resize.
 
 Nothing in this project ever opens a viewer, player or image window. Every visual
 artefact is written to disk for you to open yourself.
@@ -136,8 +137,8 @@ venv/bin/python scripts/assemble.py --pilot
 #     reports/pilot_results.md
 ```
 
-**The pipeline stops here by design.** Nothing processes the full 30 minutes
-until you explicitly run:
+**The pipeline stops here by design.** Nothing processes the whole video until
+you explicitly run:
 
 ```bash
 scripts/run_full.sh                      # prints estimates, then refuses
@@ -260,15 +261,16 @@ Benchmarked with a real 832×480 × 81-frame generation (`reports/benchmark.json
 | Fixed cost per chunk | ~52 s (VAE encode/decode + conditioning) |
 | Marginal cost per step | ~37.1 s |
 
-Extrapolated to the full 30 minutes (395 chunks, 31 995 generated frames):
+Extrapolated to a **30-minute reference workload** at 16 fps
+(395 chunks, 31 995 generated frames) — substitute your own duration:
 
-| Steps | Full 30 min |
+| Steps | Reference workload |
 |---:|---:|
 | 15 | 67 h |
 | 20 | 87 h |
 | **25 (baseline)** | **107 h** |
 
-**The full job is ~4.5 days of continuous compute on this GPU.** The GPU sits at
+**At that scale the job is ~4.5 days of continuous compute on this GPU.** The GPU sits at
 100 % utilisation, so this is compute-bound and not fixable by memory tuning: at
 this shape the Wan latent is ~33 000 tokens after patchifying and attention is
 quadratic in that, with CFG doubling it again.
