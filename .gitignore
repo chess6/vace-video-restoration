@@ -1,0 +1,101 @@
+# ---- Environments & installed software -------------------------------------
+venv/
+ComfyUI/
+models_staging/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# ---- Model weights (large, re-downloadable via scripts/download_models.sh) --
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+*.bin
+*.onnx
+
+# ---- Source media: NEVER commit, and NEVER modify ---------------------------
+# Deny the whole inputs tree first, then re-allow only the two generic docs and
+# the directory placeholders. Nothing that names, describes or derives from the
+# user's media may ever reach a remote.
+inputs/**
+!inputs/
+!inputs/source/
+!inputs/references/
+!inputs/subject_seeds/
+!inputs/source/.gitkeep
+!inputs/references/.gitkeep
+!inputs/subject_seeds/.gitkeep
+!inputs/source/README.md
+!inputs/references/README.md
+
+# Archives dropped anywhere in the project
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
+# Any media file, wherever it lands
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.m4v
+*.mpg
+*.mpeg
+*.ts
+*.wmv
+*.flv
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+*.tif
+*.tiff
+*.wav
+*.mp3
+*.aac
+*.m4a
+*.flac
+*.DS_Store
+
+# ---- Generated intermediates & outputs --------------------------------------
+intermediate/*
+!intermediate/**/.gitkeep
+outputs/*
+!outputs/**/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# ---- Caches ------------------------------------------------------------------
+.cache/
+hf_cache/
+
+# ---- Reports ------------------------------------------------------------------
+# Reports DERIVED FROM THE USER'S MEDIA are never committed: they can contain
+# filenames, durations, resolutions, scene structure and per-shot detail.
+reports/source_info.json
+reports/source_info.md
+reports/tracking_report.json
+reports/assembly.json
+reports/assembly_pilot.json
+reports/upscaler_comparison.json
+reports/pilot_results_filled.md
+
+# Machine/architecture reports ARE committed on purpose, as review material:
+#   environment.md  versions.md  runtime_estimates.md  selftest.md
+#   benchmark.json  mask_polarity.json  smoke_test.json  pilot_results.md (template)
+
+# ==== Explicitly TRACKED (small, human-authored) =============================
+# scripts/**, configs/**, workflows/**, README.md, CLAUDE.md, NEEDS_USER.md.
+# These are NOT re-included with a blanket "!scripts/**": such a rule would
+# override the __pycache__ and *.pyc rules above and commit build artefacts.
+# Nothing ignores those directories in the first place, so no exception is needed.
+
+# Belt and braces: never commit compiled Python, wherever it appears.
+**/__pycache__/
+**/*.pyc

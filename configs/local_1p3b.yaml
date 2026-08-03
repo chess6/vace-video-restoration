@@ -1,0 +1,116 @@
+# Local validation profile: Wan2.1-VACE-1.3B on an RTX 3060 (12 GB) at ~480p.
+#
+# This profile is for setup, testing and quality validation only. Production 720p
+# is expected to run from configs/cloud_14b.yaml on rented hardware.
+#
+# Constraints below are NOT guesses. They were read from the installed ComfyUI
+# revision, ComfyUI/comfy_extras/nodes_wan.py, class WanVaceToVideo:
+#   * length  : io.Int.Input("length", default=81, min=1, step=4)  -> valid = 4n+1
+#   * width   : step=16   -> must be a multiple of 16
+#   * height  : step=16   -> must be a multiple of 16
+#   * masks   : inactive = control_video * (1 - mask)
+#               reactive = control_video * mask
+#               => WHITE (1.0) = REGENERATE, BLACK (0.0) = PRESERVE
+#   * reference_image is indexed [:1] -> only ONE image is consumed, which is why
+#     references are composited into a single sheet.
+
+profile: local_1p3b
+
+model:
+  diffusion_model: wan2.1_vace_1.3B_fp16.safetensors
+  text_encoder:    umt5_xxl_fp8_e4m3fn_scaled.safetensors
+  vae:             wan_2.1_vae.safetensors
+  # umt5 xxl in ComfyUI is loaded via CLIPLoader with type "wan"
+  clip_type: wan
+  weight_dtype: default          # fp16 model; ComfyUI picks fp16 on sm_86
+
+video:
+  # Wan 2.1 is trained at 16 fps. The VACE working stream is resampled to this.
+  # The ORIGINAL fps is preserved separately in the manifest for audio sync.
+  model_fps: 16
+  # Target generation size. Both must be multiples of 16.
+  # 832x480 suits 16:9 sources; use 640x480 for 4:3. `preprocess_source.py`
+  # will warn (and can auto-pick) if this does not match the real source AR.
+  width: 832
+  height: 480
+  # Scale-and-pad, never distort.
+  fit_mode: pad
+  pad_color: black
+  # Frames per inference chunk. MUST satisfy 4n+1.
+  chunk_frames: 81
+  # Frames shared between adjacent chunks, used for seam blending.
+  # Not constrained to 4n+1. Must be < chunk_frames.
+  chunk_overlap: 8
+  # Chunks never span a hard scene cut; a shot shorter than this is padded/held.
+  min_shot_frames: 17
+
+scene_detect:
+  # PySceneDetect ContentDetector. Lower = more sensitive.
+  threshold: 27.0
+  min_scene_len_frames: 16
+
+control:
+  # Structural control profile. Depth is the baseline because the goal is to keep
+  # the whole figure's shape, volume and motion, not just facial landmarks.
+  #
+  #   depth  (default)  Depth Anything V2 Large. Carries volume and occlusion.
+  #   canny             scripts/make_depth.py --mode canny. No model, no VRAM.
+  #                     Silhouette and creases only, no volume. Kept for
+  #                     comparison; do not switch to it without testing.
+  #   pose              NOT installed. Would need a DWPose/OpenPose checkpoint.
+  #                     Pose alone discards clothing and silhouette, so it is a
+  #                     poor fit for this brief and is not part of the baseline.
+  #
+  # Whatever profile is used fills the same slot in the manifest (depth_path) and
+  # the same workflow input, so switching does not change the graph.
+  profile: depth
+  canny_low: 80
+  canny_high: 160
+
+sampling:
+  seed: 20260803
+  steps: 25
+  cfg: 5.0
+  sampler: uni_pc
+  scheduler: simple
+  denoise: 1.0
+  # WanVaceToVideo "strength": how strongly the VACE control stream binds.
+  vace_strength: 1.0
+
+mask:
+  # Feather radius in pixels applied to the tracked figure mask.
+  feather: 6
+  # Dilate the tracked mask before feathering, so the silhouette edge and a little
+  # contact shadow fall inside the regenerated region.
+  grow: 4
+  # WHITE = regenerate. The tracker writes subject=white by default.
+  polarity: white_is_regenerate
+
+prompt:
+  positive: >-
+    the same person, identical face and facial features, identical hairstyle and hair colour,
+    identical clothing with the same garments, colours, patterns, textures and accessories,
+    consistent body proportions and silhouette, natural skin texture and fabric detail,
+    sharp accurate detail, following the original pose, motion, lighting direction and
+    camera perspective, matching the surrounding scene
+  negative: >-
+    different person, face swap, changed identity, changed clothing, changed colours,
+    redesigned outfit, new background, altered scene, extra limbs, extra fingers,
+    deformed hands, distorted anatomy, duplicated body parts, warping, morphing,
+    flickering, ghosting, blurry, low quality, jpeg artifacts, oversaturated,
+    cartoon, anime, painting, illustration, text, watermark, caption, logo, border
+
+output:
+  # fps of the restored 480p master before any interpolation stage
+  fps: 16
+  # Intermediate chunk outputs are kept lossless so seam blending does not compound
+  # generation loss. The final master is high-quality H.264.
+  chunk_codec: ffv1
+  master_crf: 14
+  master_preset: slow
+
+runtime:
+  comfy_host: 127.0.0.1
+  comfy_port: 8188
+  # Refuse to run if the GPU is not visible. Never silently fall back to CPU.
+  require_cuda: true

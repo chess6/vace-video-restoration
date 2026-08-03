@@ -1,0 +1,652 @@
+{
+  "last_node_id": 11,
+  "last_link_id": 15,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [
+        0,
+        0
+      ],
+      "size": [
+        340,
+        120
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            6
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "UNETLoader",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        "wan2.1_vace_1.3B_fp16.safetensors",
+        "default"
+      ],
+      "title": "VACE 1.3B"
+    },
+    {
+      "id": 2,
+      "type": "CLIPLoader",
+      "pos": [
+        0,
+        210
+      ],
+      "size": [
+        340,
+        120
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 0,
+          "links": [
+            1,
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPLoader",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "wan",
+        "default"
+      ],
+      "title": "UMT5-XXL FP8"
+    },
+    {
+      "id": 3,
+      "type": "VAELoader",
+      "pos": [
+        0,
+        420
+      ],
+      "size": [
+        340,
+        120
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "slot_index": 0,
+          "links": [
+            5,
+            13
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        "wan_2.1_vae.safetensors"
+      ],
+      "title": "Wan 2.1 VAE"
+    },
+    {
+      "id": 4,
+      "type": "CLIPTextEncode",
+      "pos": [
+        400,
+        0
+      ],
+      "size": [
+        340,
+        120
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            3
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        "the same person, identical face and facial features, identical hairstyle and hair colour, identical clothing with the same garments, colours, patterns, textures and accessories, consistent body proportions and silhouette, natural skin texture and fabric detail, sharp accurate detail, following the original pose, motion, lighting direction and camera perspective, matching the surrounding scene"
+      ],
+      "title": "Positive prompt"
+    },
+    {
+      "id": 5,
+      "type": "CLIPTextEncode",
+      "pos": [
+        400,
+        210
+      ],
+      "size": [
+        340,
+        120
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            4
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        "different person, face swap, changed identity, changed clothing, changed colours, redesigned outfit, new background, altered scene, extra limbs, extra fingers, deformed hands, distorted anatomy, duplicated body parts, warping, morphing, flickering, ghosting, blurry, low quality, jpeg artifacts, oversaturated, cartoon, anime, painting, illustration, text, watermark, caption, logo, border"
+      ],
+      "title": "Negative prompt"
+    },
+    {
+      "id": 6,
+      "type": "WanVaceToVideo",
+      "pos": [
+        800,
+        0
+      ],
+      "size": [
+        340,
+        120
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 3
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 4
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 5
+        },
+        {
+          "name": "control_video",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "control_masks",
+          "type": "MASK",
+          "link": null
+        },
+        {
+          "name": "reference_image",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            7
+          ]
+        },
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 1,
+          "links": [
+            8
+          ]
+        },
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 2,
+          "links": [
+            9
+          ]
+        },
+        {
+          "name": "INT",
+          "type": "INT",
+          "slot_index": 3,
+          "links": [
+            11
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "WanVaceToVideo",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        272,
+        272,
+        17,
+        1,
+        1.0
+      ],
+      "title": "VACE conditioning (smoke)"
+    },
+    {
+      "id": 7,
+      "type": "KSampler",
+      "pos": [
+        1200,
+        0
+      ],
+      "size": [
+        340,
+        120
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 6
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 7
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 8
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            10
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "KSampler",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        20260803,
+        "fixed",
+        6,
+        5.0,
+        "uni_pc",
+        "simple",
+        1.0
+      ],
+      "title": "Sampler (few steps)"
+    },
+    {
+      "id": 8,
+      "type": "TrimVideoLatent",
+      "pos": [
+        1600,
+        0
+      ],
+      "size": [
+        340,
+        120
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 10
+        },
+        {
+          "name": "trim_amount",
+          "type": "INT",
+          "link": 11,
+          "widget": {
+            "name": "trim_amount"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            12
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "TrimVideoLatent",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        0
+      ],
+      "title": "Trim"
+    },
+    {
+      "id": 9,
+      "type": "VAEDecode",
+      "pos": [
+        2000,
+        0
+      ],
+      "size": [
+        340,
+        120
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 12
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            14
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecode",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [],
+      "title": "Decode"
+    },
+    {
+      "id": 10,
+      "type": "CreateVideo",
+      "pos": [
+        2400,
+        0
+      ],
+      "size": [
+        340,
+        120
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 14
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "slot_index": 0,
+          "links": [
+            15
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CreateVideo",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        16.0,
+        8
+      ],
+      "title": "Assemble"
+    },
+    {
+      "id": 11,
+      "type": "SaveVideo",
+      "pos": [
+        2800,
+        0
+      ],
+      "size": [
+        340,
+        120
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 15
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "slot_index": 0,
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SaveVideo",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": [
+        "vace/smoke",
+        "auto",
+        "auto"
+      ],
+      "title": "Save smoke clip"
+    }
+  ],
+  "links": [
+    [
+      1,
+      2,
+      0,
+      4,
+      0,
+      "CLIP"
+    ],
+    [
+      2,
+      2,
+      0,
+      5,
+      0,
+      "CLIP"
+    ],
+    [
+      3,
+      4,
+      0,
+      6,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      4,
+      5,
+      0,
+      6,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      5,
+      3,
+      0,
+      6,
+      2,
+      "VAE"
+    ],
+    [
+      6,
+      1,
+      0,
+      7,
+      0,
+      "MODEL"
+    ],
+    [
+      7,
+      6,
+      0,
+      7,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      8,
+      6,
+      1,
+      7,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      9,
+      6,
+      2,
+      7,
+      3,
+      "LATENT"
+    ],
+    [
+      10,
+      7,
+      0,
+      8,
+      0,
+      "LATENT"
+    ],
+    [
+      11,
+      6,
+      3,
+      8,
+      1,
+      "INT"
+    ],
+    [
+      12,
+      8,
+      0,
+      9,
+      0,
+      "LATENT"
+    ],
+    [
+      13,
+      3,
+      0,
+      9,
+      1,
+      "VAE"
+    ],
+    [
+      14,
+      9,
+      0,
+      10,
+      0,
+      "IMAGE"
+    ],
+    [
+      15,
+      10,
+      0,
+      11,
+      0,
+      "VIDEO"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "note": "Loads VACE 1.3B + UMT5 FP8 + Wan VAE and generates a short clip through WanVaceToVideo. Proves CUDA inference and the full path."
+  },
+  "version": 0.4
+}

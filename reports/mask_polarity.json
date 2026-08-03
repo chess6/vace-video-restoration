@@ -1,0 +1,15 @@
+{
+  "width": 448,
+  "height": 256,
+  "length": 17,
+  "steps": 6,
+  "left_white_mean_abs_change": 85.4389,
+  "right_black_mean_abs_change": 3.6971,
+  "ratio": 23.11,
+  "required_ratio": 1.8,
+  "verdict": "white_is_regenerate",
+  "passed": true,
+  "config_expects": "white_is_regenerate",
+  "source_of_truth": "ComfyUI/comfy_extras/nodes_wan.py::WanVaceToVideo, reactive = control_video * mask",
+  "output_clip": "/home/thomas/Dev/upscaler/vace-video-restoration/ComfyUI/output/vace/polarity_00004_.mp4"
+}

@@ -1,0 +1,173 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "wan2.1_vace_1.3B_fp16.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "VACE 1.3B"
+    }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan",
+      "device": "default"
+    },
+    "_meta": {
+      "title": "UMT5-XXL FP8"
+    }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    },
+    "_meta": {
+      "title": "Wan 2.1 VAE"
+    }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "the same person, identical face and facial features, identical hairstyle and hair colour, identical clothing with the same garments, colours, patterns, textures and accessories, consistent body proportions and silhouette, natural skin texture and fabric detail, sharp accurate detail, following the original pose, motion, lighting direction and camera perspective, matching the surrounding scene",
+      "clip": [
+        "2",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Positive prompt"
+    }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "different person, face swap, changed identity, changed clothing, changed colours, redesigned outfit, new background, altered scene, extra limbs, extra fingers, deformed hands, distorted anatomy, duplicated body parts, warping, morphing, flickering, ghosting, blurry, low quality, jpeg artifacts, oversaturated, cartoon, anime, painting, illustration, text, watermark, caption, logo, border",
+      "clip": [
+        "2",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Negative prompt"
+    }
+  },
+  "6": {
+    "class_type": "WanVaceToVideo",
+    "inputs": {
+      "positive": [
+        "4",
+        0
+      ],
+      "negative": [
+        "5",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
+      "width": 272,
+      "height": 272,
+      "length": 17,
+      "batch_size": 1,
+      "strength": 1.0
+    },
+    "_meta": {
+      "title": "VACE conditioning (smoke)"
+    }
+  },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "seed": 20260803,
+      "steps": 6,
+      "cfg": 5.0,
+      "sampler_name": "uni_pc",
+      "scheduler": "simple",
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "6",
+        1
+      ],
+      "latent_image": [
+        "6",
+        2
+      ],
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "Sampler (few steps)"
+    }
+  },
+  "8": {
+    "class_type": "TrimVideoLatent",
+    "inputs": {
+      "samples": [
+        "7",
+        0
+      ],
+      "trim_amount": [
+        "6",
+        3
+      ]
+    },
+    "_meta": {
+      "title": "Trim"
+    }
+  },
+  "9": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "8",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Decode"
+    }
+  },
+  "10": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "images": [
+        "9",
+        0
+      ],
+      "fps": 16.0
+    },
+    "_meta": {
+      "title": "Assemble"
+    }
+  },
+  "11": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": [
+        "10",
+        0
+      ],
+      "filename_prefix": "vace/smoke",
+      "format": "auto",
+      "codec": "auto"
+    },
+    "_meta": {
+      "title": "Save smoke clip"
+    }
+  }
+}

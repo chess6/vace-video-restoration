@@ -1,0 +1,105 @@
+# Cloud production profile: Wan2.1-VACE-14B at native 720p.
+#
+# NOTHING here is downloaded or executed locally. The 14B model will not fit the
+# RTX 3060 and, per project instruction, is not attempted on this machine.
+#
+# The point of this file is reuse: the SAME chunk manifest, reference sheets,
+# prompts, masks and depth videos produced locally feed this profile unchanged.
+# Only `video.width/height`, the model names and the sampler budget differ.
+#
+# Because the manifest stores source TIMES as well as frame indices, regenerating
+# the manifest at 720p does not invalidate the masks/depth: rerun
+#   scripts/preprocess_source.py --config configs/cloud_14b.yaml
+#   scripts/make_depth.py        --config configs/cloud_14b.yaml
+#   scripts/track_subject.py     --config configs/cloud_14b.yaml
+# on the cloud box to re-render the control streams at the higher resolution from
+# the same normalized source and the same tracked seeds.
+
+profile: cloud_14b
+
+model:
+  diffusion_model: wan2.1_vace_14B_fp16.safetensors
+  text_encoder:    umt5_xxl_fp8_e4m3fn_scaled.safetensors
+  vae:             wan_2.1_vae.safetensors
+  clip_type: wan
+  weight_dtype: default
+
+# Download these ON THE CLOUD MACHINE ONLY.
+# Verified reachable at authoring time; re-check sizes/sha256 before trusting.
+download:
+  repo: Comfy-Org/Wan_2.1_ComfyUI_repackaged
+  files:
+    - split_files/diffusion_models/wan2.1_vace_14B_fp16.safetensors
+    - split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
+    - split_files/vae/wan_2.1_vae.safetensors
+  note: >-
+    A bf16/fp8 14B variant may be preferable depending on the rented GPU.
+    On a 48 GB card (A6000/L40S) fp16 is comfortable at 1280x720x81.
+    On a 24 GB card (4090/A10G) use the fp8_scaled 14B variant or reduce
+    chunk_frames to 61.
+
+video:
+  model_fps: 16
+  # Native 720p for Wan 2.1. Both multiples of 16.
+  width: 1280
+  height: 720
+  fit_mode: pad
+  pad_color: black
+  chunk_frames: 81
+  chunk_overlap: 16      # wider overlap is affordable here and blends better
+  min_shot_frames: 17
+
+scene_detect:
+  threshold: 27.0
+  min_scene_len_frames: 16
+
+control:
+  # Keep identical to local_1p3b.yaml so the cloud run differs from the validated
+  # local pilot only in model capacity and resolution.
+  profile: depth
+  canny_low: 80
+  canny_high: 160
+
+sampling:
+  seed: 20260803         # keep identical to the local pilot for comparability
+  steps: 30
+  cfg: 5.0
+  sampler: uni_pc
+  scheduler: simple
+  denoise: 1.0
+  vace_strength: 1.0
+
+mask:
+  feather: 10            # scaled up with resolution
+  grow: 6
+  polarity: white_is_regenerate
+
+# Prompts are intentionally identical to local_1p3b.yaml so the only variable
+# between the local pilot and cloud production is model capacity and resolution.
+prompt:
+  positive: >-
+    the same person, identical face and facial features, identical hairstyle and hair colour,
+    identical clothing with the same garments, colours, patterns, textures and accessories,
+    consistent body proportions and silhouette, natural skin texture and fabric detail,
+    sharp accurate detail, following the original pose, motion, lighting direction and
+    camera perspective, matching the surrounding scene
+  negative: >-
+    different person, face swap, changed identity, changed clothing, changed colours,
+    redesigned outfit, new background, altered scene, extra limbs, extra fingers,
+    deformed hands, distorted anatomy, duplicated body parts, warping, morphing,
+    flickering, ghosting, blurry, low quality, jpeg artifacts, oversaturated,
+    cartoon, anime, painting, illustration, text, watermark, caption, logo, border
+
+output:
+  fps: 16
+  chunk_codec: ffv1
+  master_crf: 12
+  master_preset: slow
+
+runtime:
+  comfy_host: 127.0.0.1
+  comfy_port: 8188
+  require_cuda: true
+  # Suggested rented hardware, for reference only.
+  suggested_gpu: "1x L40S 48GB or 1x A6000 48GB"
+  estimated_vram_gb: 38

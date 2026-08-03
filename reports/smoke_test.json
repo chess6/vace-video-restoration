@@ -1,0 +1,130 @@
+{
+  "checks": [
+    {
+      "name": "ComfyUI API reachable",
+      "ok": true,
+      "detail": "127.0.0.1:8188"
+    },
+    {
+      "name": "CUDA device reported by ComfyUI",
+      "ok": true,
+      "detail": "cuda:0 NVIDIA GeForce RTX 3060 : cudaMallocAsync"
+    },
+    {
+      "name": "VACE 1.3B visible to UNETLoader",
+      "ok": true,
+      "detail": "wan2.1_vace_1.3B_fp16.safetensors"
+    },
+    {
+      "name": "UMT5 FP8 visible to CLIPLoader",
+      "ok": true,
+      "detail": "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+    },
+    {
+      "name": "Wan VAE visible to VAELoader",
+      "ok": true,
+      "detail": "wan_2.1_vae.safetensors"
+    },
+    {
+      "name": "WanVaceToVideo node exists",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "vace_masked_depth_v2v_1p3b: all node types installed",
+      "ok": true,
+      "detail": "21 nodes"
+    },
+    {
+      "name": "vace_unmasked_compare: all node types installed",
+      "ok": true,
+      "detail": "15 nodes"
+    },
+    {
+      "name": "smoke_test_modelload: all node types installed",
+      "ok": true,
+      "detail": "11 nodes"
+    },
+    {
+      "name": "smoke workflow contains WanVaceToVideo (not bypassed)",
+      "ok": true,
+      "detail": "node ['6']"
+    },
+    {
+      "name": "sampler consumes VACE conditioning + latent",
+      "ok": true,
+      "detail": "positive/negative/latent_image <- node 6"
+    },
+    {
+      "name": "smoke generation completed",
+      "ok": true,
+      "detail": "20.0s"
+    },
+    {
+      "name": "peak VRAM was non-trivial (proves GPU execution, not CPU)",
+      "ok": true,
+      "detail": "11661 MiB"
+    },
+    {
+      "name": "run produced an output file",
+      "ok": true,
+      "detail": "smoke_00001_.mp4"
+    },
+    {
+      "name": "output video decodes",
+      "ok": true,
+      "detail": "17 frames, 42.1 KiB"
+    },
+    {
+      "name": "output has the requested frame count",
+      "ok": true,
+      "detail": "got 17, expected 17"
+    },
+    {
+      "name": "output is not a blank/uniform clip",
+      "ok": true,
+      "detail": "pixel std 55.08"
+    },
+    {
+      "name": "output varies over time (not a frozen frame)",
+      "ok": true,
+      "detail": "temporal std 7.9062"
+    },
+    {
+      "name": "no tracebacks in ComfyUI log",
+      "ok": true,
+      "detail": "0 traceback(s)"
+    }
+  ],
+  "passed": 19,
+  "failed": 0,
+  "device": {
+    "name": "cuda:0 NVIDIA GeForce RTX 3060 : cudaMallocAsync",
+    "type": "cuda",
+    "index": 0,
+    "vram_total": 12464750592,
+    "vram_free": 11321540608,
+    "torch_vram_total": 0,
+    "torch_vram_free": 0
+  },
+  "comfyui_version": "0.30.0",
+  "elapsed_sec": 20.02,
+  "peak_vram_mb": 11661,
+  "peak_vram_pct": 98.1,
+  "output": {
+    "path": "/home/thomas/Dev/upscaler/vace-video-restoration/ComfyUI/output/vace/smoke_00001_.mp4",
+    "exists": true,
+    "size_bytes": 43060,
+    "size_human": "42.1 KiB",
+    "width": 272,
+    "height": 272,
+    "fps": 16.0,
+    "frames": 17,
+    "decoded_frames": 17,
+    "mean": 49.553,
+    "std": 55.08,
+    "temporal_std": 7.9062,
+    "is_blank": false
+  },
+  "saved_copy": "outputs/pilots/smoke_test.mp4"
+}

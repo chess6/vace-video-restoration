@@ -1,0 +1,33 @@
+{
+  "resolution": [
+    832,
+    480
+  ],
+  "chunk_frames": 81,
+  "chunk_overlap": 8,
+  "steps": 25,
+  "sampler": "uni_pc",
+  "model_fps": 16,
+  "measured": {
+    "chunk_seconds": 979.96,
+    "seconds_per_generated_frame": 12.0982,
+    "peak_vram_mb": 11854
+  },
+  "projection_basis": "an estimate for 30 minutes at 16 fps",
+  "projection": {
+    "source_frames": 28800,
+    "chunks": 395,
+    "generated_frames": 31995,
+    "overlap_overhead_pct": 11.1,
+    "total_seconds": 387082.7,
+    "total_human": "107h 31m 22s",
+    "hours": 107.52
+  },
+  "disk_estimate": {
+    "intermediate_bytes": 2044710000,
+    "intermediate_human": "1.9 GiB",
+    "outputs_bytes": 7807725000,
+    "outputs_human": "7.3 GiB",
+    "total_human": "9.2 GiB"
+  }
+}
