@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Enforce CLAUDE.md rules 1 and 2a before anything leaves this machine.
+set -uo pipefail
+PROJ="$(git rev-parse --show-toplevel)"
+echo "pre-push: running repository guards..."
+"$PROJ/scripts/check_repo_clean.sh" > /tmp/prepush_clean.txt 2>&1 || {
+  echo "PUSH BLOCKED - private material would be published:"; cat /tmp/prepush_clean.txt; exit 1; }
+MPLBACKEND=Agg "$PROJ/scripts/check_no_display.sh" > /tmp/prepush_display.txt 2>&1 || {
+  echo "PUSH BLOCKED - no-display rule violated:"; cat /tmp/prepush_display.txt; exit 1; }
+echo "pre-push: both guards passed."

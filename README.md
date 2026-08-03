@@ -172,6 +172,29 @@ scripts/run_full.sh --confirm-full-run   # actually starts
 | Full run (guarded) | `scripts/run_full.sh --confirm-full-run` |
 | Resume failed chunks only | `venv/bin/python scripts/run_chunks.py --resume-failed` |
 | End-to-end self-test | `scripts/selftest.sh` |
+| Record pinned versions | `scripts/record_versions.sh` |
+| Enforce the no-display rule | `scripts/check_no_display.sh` |
+| Verify nothing private is committed | `scripts/check_repo_clean.sh` |
+
+### Repository hygiene
+
+Two guards enforce the rules in `CLAUDE.md` and both run automatically on
+`git push` via `.git/hooks/pre-push`:
+
+- **`check_no_display.sh`** — fails if any code calls a viewer or player, if the
+  ComfyUI launcher could open a browser, if the GUI build of OpenCV is installed,
+  or if matplotlib has an interactive backend.
+- **`check_repo_clean.sh`** — fails if any media, archive or compiled Python is
+  tracked, if anything but the two placeholder docs is tracked under `inputs/`,
+  or if any tracked file's *contents* mention a filename that currently exists in
+  `inputs/`. The forbidden-word list is derived at run time from whatever is
+  actually in `inputs/` — including entries inside archives, listed without
+  extracting them — so it keeps working for future material without being told
+  anything about it.
+
+Everything under `inputs/` is ignored wholesale, along with every common media
+and archive extension project-wide, and every report derived from source media
+(`source_info.*`, `tracking_report.json`, `assembly*.json`).
 
 Every long-running script logs to `logs/<name>.log`, records per-chunk status in
 `intermediate/chunk_manifest.json`, and is resumable by re-running it.
