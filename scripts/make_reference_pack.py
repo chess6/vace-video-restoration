@@ -1,24 +1,25 @@
 #!/usr/bin/env python
-"""Phase 5b - per-appearance reference packs, with the outfit taken from source.
+"""Phase 5b - identity-only external conditioning + source-derived garment.
 
-The single global reference sheet was the direct cause of invented clothing
-colours: it tiled whichever three photographs scored best, so a shot could be
-conditioned on two different outfits at once, and VACE resolved the conflict by
-inventing a third. This builds ONE pack per appearance cluster, and never mixes
-conflicting outfits into the same image.
+The task here is to RESTORE the garment that is already in the footage, not to
+infer a garment from photographs taken elsewhere. Those two things were being
+conflated, and that is why clothing colours were invented.
 
-The division of labour that makes this work:
+Strict division of authority:
 
-  * The external photographs are the authority on IDENTITY and on high-frequency
-    detail - face structure, hair, skin texture. They are not the authority on
-    what the person is wearing in this shot, because they were taken elsewhere.
-  * THIS SOURCE INTERVAL is the authority on the current outfit: garment shape,
-    boundaries, accessories and colour. It is low resolution, but it is the only
-    thing that is actually correct about the clothes.
+  * External photographs condition IDENTITY ONLY - face, hair, exposed skin,
+    body appearance. Their clothing is segmented out and replaced with neutral
+    grey before the panel is drawn, so it cannot reach the model at all. A faint
+    ghost of the wrong jacket is still a jacket to a generative model.
+  * THIS SOURCE INTERVAL is the sole ground truth for the garment: class,
+    silhouette, boundaries, colours, patterns, accessories, folds and how they
+    move. It is low resolution, and that is fine - the job is to preserve its
+    low-frequency colour and structure while generating only the missing
+    high-frequency texture.
 
-So the pack is assembled as: strongest identity/face view from the externals, an
-exact-outfit body view taken from the best SOURCE frame, and one compatible
-alternate angle. Panels are labelled with their provenance and validation score.
+References are still clustered by appearance so conflicting outfits are never
+combined, but that clustering now serves identity selection; it is not what
+fixes the garment. Panels carry provenance and validation scores.
 
 Clustering is automatic (CLIP appearance embeddings + garment histograms), and
 so is garment parsing (SegFormer). No manual labelling anywhere.
@@ -54,6 +55,38 @@ LBL = {0: "background", 1: "hat", 2: "hair", 3: "sunglasses", 4: "upper",
 GARMENT = {"hat", "upper", "skirt", "pants", "dress", "belt", "left_shoe",
            "right_shoe", "bag", "scarf"}
 SKIN = {"face", "left_leg", "right_leg", "left_arm", "right_arm"}
+# What an EXTERNAL photograph is allowed to condition: identity only. Its
+# clothing belongs to a different day and must never reach the model, because
+# VACE will happily treat it as the garment to draw. Sunglasses and hats are
+# excluded too - they are accessories of that other appearance, not identity.
+IDENTITY_ONLY = {"hair", "face", "left_leg", "right_leg", "left_arm", "right_arm"}
+
+
+def identity_regions(labels: np.ndarray) -> np.ndarray:
+    """Boolean mask of the pixels of an external photo that may be shown."""
+    ids = [i for i, n in LBL.items() if n in IDENTITY_ONLY]
+    return np.isin(labels, ids)
+
+
+def mask_to_identity(im, labels, feather: int = 3):
+    """Blank everything that is not identity in an external reference.
+
+    Garments, accessories and background are removed rather than dimmed: a faint
+    ghost of the wrong jacket is still a jacket as far as the model is concerned.
+    A few pixels of feather stop the cut-out edge from reading as a hard graphic
+    shape, which would itself become something to reproduce.
+    """
+    import cv2
+    from PIL import Image
+    arr = np.asarray(im).astype(np.float32)
+    m = identity_regions(labels).astype(np.float32)
+    if feather > 0:
+        r = feather * 2 + 1
+        m = cv2.GaussianBlur(m, (r, r), 0)
+    # Neutral mid-grey, not black: a large black field shifts the exposure the
+    # model infers from the panel.
+    out = arr * m[..., None] + 128.0 * (1.0 - m[..., None])
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), float(m.mean())
 
 
 class Parser:
@@ -205,8 +238,8 @@ def cluster_references(files: list[Path], parser: Parser, models, bank, log,
         pal = palette(np.asarray(im), lab)
         emb = models.clip_embed([im])[0]
         face, _, face_frac = models.face_embed(im)
-        items.append({"file": f, "image": im, "palette": pal, "clip": emb,
-                      "face": face, "face_frac": face_frac,
+        items.append({"file": f, "image": im, "labels": lab, "palette": pal,
+                      "clip": emb, "face": face, "face_frac": face_frac,
                       "size": list(im.size)})
 
     # Appearance clustering: garment palette distance first (that is what an
@@ -322,9 +355,11 @@ def main() -> int:
             "outfit_authority": "external_photograph" if exact else "source_frames",
             "source_palette": outfit["palette"],
             "panels": [
-                {"role": "identity_face", "provenance": panel_face["file"].name,
+                {"role": "identity_face_only", "provenance": panel_face["file"].name,
                  "native_size": panel_face["size"],
                  "upscaled": False,
+                 "conditions": "face, hair and exposed skin only; clothing and "
+                               "accessories segmented out",
                  "face_fraction": round(float(panel_face["face_frac"] or 0), 4)},
                 {"role": "exact_outfit_body",
                  "provenance": f"source frame {outfit['best']['frame']} "
@@ -336,7 +371,9 @@ def main() -> int:
         }
         if alt is not None:
             pack["panels"].append(
-                {"role": "alternate_angle", "provenance": alt["file"].name,
+                {"role": "alternate_angle_identity_only",
+                 "provenance": alt["file"].name,
+                 "conditions": "identity regions only; clothing segmented out",
                  "native_size": alt["size"], "upscaled": False})
 
         # ---- render the sheet ------------------------------------------------
@@ -344,9 +381,27 @@ def main() -> int:
         n = len(pack["panels"])
         pw, ph = W // n, H
         sheet = Image.new("RGB", (W, H), (0, 0, 0))
-        imgs = [panel_face["image"], Image.fromarray(outfit["best"]["crop"])]
+        # EXTERNAL panels are stripped to identity before they are drawn. Their
+        # clothing is from another day; leaving it visible invites the model to
+        # reproduce it, which is the fault being corrected. The SOURCE panel is
+        # left whole - it is the only correct record of the current garment.
+        face_img, face_keep = mask_to_identity(panel_face["image"],
+                                               panel_face["labels"])
+        imgs = [face_img, Image.fromarray(outfit["best"]["crop"])]
+        pack["panels"][0]["clothing_removed"] = True
+        pack["panels"][0]["identity_pixels_kept"] = round(face_keep, 4)
         if alt is not None:
-            imgs.append(alt["image"])
+            alt_img, alt_keep = mask_to_identity(alt["image"], alt["labels"])
+            imgs.append(alt_img)
+            pack["panels"][2]["clothing_removed"] = True
+            pack["panels"][2]["identity_pixels_kept"] = round(alt_keep, 4)
+        low = [i for i, k in enumerate((face_keep,) + ((alt_keep,) if alt is not None
+                                                       else ())) if k < 0.05]
+        if low:
+            log.warning("%s: identity masking kept under 5%% of panel(s) %s. The "
+                        "parser may have failed on those photographs; check the "
+                        "pack sheet before trusting the identity conditioning.",
+                        sid, low)
         for i, im in enumerate(imgs):
             k = min(pw / im.width, ph / im.height)
             # Only ever downscale to fit the panel. A 720p reference is adequate;
