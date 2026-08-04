@@ -113,11 +113,22 @@ def plan_roi(boxes: list, W: int, H: int, out_w: int, out_h: int, cfg: dict,
     # momentarily loose mask would otherwise force the crop out to the full
     # frame and destroy the entire point of the exercise. Frames beyond this
     # percentile lose a little at the edges, which costs less than no zoom.
+    # Occupancy is measured on whichever axis the subject actually extends
+    # along, not on height. "Fill 78% of the crop's HEIGHT" silently assumes an
+    # upright figure; a reclining one is wide and short, so height-based sizing
+    # asks for a crop far tighter than its own width and the planner then has to
+    # give the zoom straight back. Sizing on the dominant extent asks the same
+    # question - how much of the frame should the subject occupy - in a way that
+    # does not depend on which way up they are.
     h_ref = float(np.percentile(bh, float(r["height_percentile"])))
+    w_ref = float(np.percentile(bw, float(r["height_percentile"])))
     need_h = float(np.percentile(bh * margin, keep))
     need_w = float(np.percentile(bw * margin, keep))
 
-    crop_h = max(h_ref / max(target_frac, 1e-3), need_h, need_w * (out_h / out_w))
+    # The crop height each axis's target implies; take whichever binds.
+    from_h = h_ref / max(target_frac, 1e-3)
+    from_w = (w_ref / max(target_frac, 1e-3)) * (out_h / out_w)
+    crop_h = max(from_h, from_w, need_h, need_w * (out_h / out_w))
     crop_w = crop_h * (out_w / out_h)
     # Never larger than the frame: letterboxing would waste the gain.
     if crop_w > W or crop_h > H:

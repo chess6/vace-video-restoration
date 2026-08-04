@@ -74,7 +74,15 @@ DINO_REV = "12bdfa3120f3e7ec7b434d90674b3396eccf88eb"
 CLIP_REV = "32bd64288804d66eefd0ccbe215aa642df71cc41"
 SAM2_REV = "665f8e2ad61cf5f53d65644ff27c8ee525124610"
 
-DETECT_PROMPT = "a person. a human. a man. a woman. a child."
+# Grounding DINO is trained on overwhelmingly upright people, so "a person"
+# alone finds standing bystanders confidently and a reclining figure weakly or
+# not at all - the box is wide rather than tall and matches the prompt poorly.
+# On a shot whose subject is horizontal that bias is not a small ranking effect:
+# it can mean the only candidate offered IS somebody else. The reclining phrasings
+# are here to give that figure its own way of being named.
+DETECT_PROMPT = ("a person. a human. a man. a woman. a child. "
+                 "a person reclining. a reclining figure. a person on the ground. "
+                 "a person on a bed. a person seen from above. a body.")
 
 # Grounding DINO box threshold. 0.30 suits clean photographs; a heavily degraded
 # low-resolution source scores the same true detection lower, so when the primary
@@ -717,6 +725,37 @@ def main() -> int:
 
             det_thr = args.detect_threshold
             best, all_cands = probe_pass(det_thr)
+
+            # "Found somebody" is not "found the subject". The retry below used
+            # to fire only when the primary pass found NOTHING, which means a
+            # confident detection of the wrong person suppressed it entirely.
+            # That is what happened on a shot whose subject is reclining: the
+            # detector is trained on upright people, so the target scored below
+            # threshold while an upright bystander scored above it, and the
+            # bystander was the only candidate ever offered.
+            #
+            # So the retry also fires when candidates exist but NONE of them
+            # carries identity evidence: no resolvable face anywhere is exactly
+            # the symptom of the right person never having been surfaced.
+            if (best is not None
+                    and not any(c.get("face_sim") is not None for c in all_cands)
+                    and args.detect_threshold_min < det_thr):
+                log.warning("%s: %d candidate(s) at %.2f but not one has a "
+                            "resolvable face. Retrying at %.2f before trusting "
+                            "any of them - an unusual pose scores low, and the "
+                            "subject may simply never have been surfaced.",
+                            sid, len(all_cands), det_thr, args.detect_threshold_min)
+                lo_best, lo_cands = probe_pass(args.detect_threshold_min)
+                if any(c.get("face_sim") is not None for c in lo_cands):
+                    log.warning("%s: the lower threshold surfaced a candidate "
+                                "WITH identity evidence. Using it.", sid)
+                    det_thr, best, all_cands = (args.detect_threshold_min,
+                                                lo_best, lo_cands)
+                else:
+                    # Keep the wider candidate set anyway: the ambiguity report
+                    # and the review sheet should show what was actually there.
+                    all_cands = lo_cands or all_cands
+
             if best is None and args.detect_threshold_min < det_thr:
                 det_thr = args.detect_threshold_min
                 log.warning("%s: nothing above the %.2f detection threshold; "

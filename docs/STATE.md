@@ -145,10 +145,10 @@ Run namespacing: `VACE_RUN=<name>` → `runs/<name>/{intermediate,outputs,report
 
 Past mistakes worth not repeating — each cost a wrong conclusion:
 
-- **Circular measurement.** Occluders were defined as `people & ~dilate(subject)`
-  and then tested for overlap with `dilate(subject)`. Empty by construction. The
-  reported "0.0000% OK" was a tautology, not a result. Define occluders against
-  the subject at true extent; apply dilation only *after* the set is fixed.
+- **Circular measurement.** Never test a set against something derived by
+  subtracting it. Occluders defined as `people & ~dilate(subject)` and then
+  tested against `dilate(subject)` are empty by construction; the "0.0000% OK"
+  was a tautology.
 - **Self-comparison as evidence.** The identity bank is built from the reference
   photographs, so scoring a photograph against it returns 1.000 for anything
   already in it. Verify by consensus: collapse near-duplicates, then score by
@@ -160,13 +160,17 @@ Past mistakes worth not repeating — each cost a wrong conclusion:
   beside the subject occludes nothing; verify depth order. A rise in
   high-frequency energy is not restored texture — ringing and noise raise it
   too. Name the measurement after what it measures.
+- **A detector's training bias read as absence.** Grounding DINO is trained on
+  upright people. A reclining subject scores below the 0.30 threshold while an
+  upright bystander scores above it — measured here at ≤0.27 vs 0.33–0.36 — so
+  the only candidate offered was the wrong person. "Found somebody" is not
+  "found the subject": retry at a lower threshold whenever no candidate has
+  identity evidence, not only when nothing at all was found. Never size or score
+  a subject by height alone; an unusual pose makes height the wrong axis.
 - **Container noise read as signal.** An exact-equality background metric
   measured encoder noise and inverted the ranking. Use a tolerance.
 - **Piping a build through `head`/`tail`.** SIGPIPE killed a generator mid-write
-  and left a stale graph; `tail` masked a non-zero exit. Do not pipe long-running
-  builds through either.
-- Prove masks are produced **independently** before reporting an overlap between
-  them, and report the frames where occlusion actually occurs.
+  and left a stale graph; `tail` masked a non-zero exit.
 
 ## Standing instructions from the user
 
@@ -191,5 +195,3 @@ Tracked in the task list; kept here only as orientation.
 - Whole-body pose control: generate a pose-controlled variant and compare it
   against the depth-controlled one under identical references, background,
   prompt and seed.
-- Multi-chunk assembly is exercised on a synthetic longer interval, separately
-  from the pilot, which is padded to a single inference.

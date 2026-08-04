@@ -31,6 +31,33 @@ COLOURS = [(255, 64, 64), (64, 220, 64), (80, 160, 255), (255, 200, 40),
            (255, 90, 255), (60, 230, 230), (255, 140, 60), (180, 120, 255)]
 
 
+def suppress(boxes, iou_thresh=0.55, max_frame_cover=0.80):
+    """Thin near-duplicate boxes down to a menu a human can actually use.
+
+    At a low detection threshold one figure produces a dozen nested boxes, and
+    thirty options is not a choice. Highest score wins each cluster.
+
+    Boxes covering most of the frame are dropped: at that size the detector has
+    latched onto the scene rather than a person, and they crowd out the real
+    candidates. Nothing else is filtered - an unusual pose is exactly what we
+    are looking for here, so low scores stay in.
+    """
+    keep = []
+    for b in sorted(boxes, key=lambda b: -b[4]):
+        x0, y0, x1, y1 = b[:4]
+        for k in keep:
+            ix0, iy0 = max(x0, k[0]), max(y0, k[1])
+            ix1, iy1 = min(x1, k[2]), min(y1, k[3])
+            inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+            a = (x1 - x0) * (y1 - y0)
+            ka = (k[2] - k[0]) * (k[3] - k[1])
+            if inter / max(1e-6, a + ka - inter) > iou_thresh:
+                break
+        else:
+            keep.append(b)
+    return keep
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -72,7 +99,11 @@ def main() -> int:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         kw = ({} if args.detect_threshold is None
               else {"threshold": args.detect_threshold})
-        boxes = models.detect_people(Image.fromarray(rgb), **kw)[:args.max_candidates]
+        boxes = models.detect_people(Image.fromarray(rgb), **kw)
+        H0, W0 = canvas_shape = frame.shape[:2]
+        boxes = [b for b in boxes
+                 if (b[2] - b[0]) * (b[3] - b[1]) <= 0.80 * W0 * H0]
+        boxes = suppress(boxes)[:args.max_candidates]
         canvas = frame.copy()
         for bx in boxes:
             x0, y0, x1, y1 = (int(v) for v in bx[:4])
@@ -84,7 +115,12 @@ def main() -> int:
             table.append({"id": idx, "shot_frame": want - a, "abs_frame": want,
                           "box": [round(float(v), 1) for v in bx[:4]],
                           "det_score": round(float(bx[4]), 3),
-                          "height_frac": round((y1 - y0) / canvas.shape[0], 3)})
+                          "height_frac": round((y1 - y0) / canvas.shape[0], 3),
+                          "width_frac": round((x1 - x0) / canvas.shape[1], 3),
+                          # Wider than tall usually means a reclining figure.
+                          # Worth showing, because the detector's own score is
+                          # biased against exactly that pose.
+                          "aspect": round((x1 - x0) / max(1, y1 - y0), 2)})
             idx += 1
         cv2.putText(canvas, f"frame {want - a}", (8, canvas.shape[0] - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
@@ -115,9 +151,12 @@ def main() -> int:
     log.info("Open it yourself; nothing was displayed.")
     log.info("")
     for t in table:
-        log.info("  [%d] frame %-3d  box %-32s  height %4.1f%% of frame  det %.2f",
-                 t["id"], t["shot_frame"], ",".join(str(int(v)) for v in t["box"]),
-                 100 * t["height_frac"], t["det_score"])
+        log.info("  [%d] frame %-3d  box %-24s  %4.1f%%h x %4.1f%%w  aspect %.2f "
+                 "%-12s det %.2f", t["id"], t["shot_frame"],
+                 ",".join(str(int(v)) for v in t["box"]),
+                 100 * t["height_frac"], 100 * t["width_frac"], t["aspect"],
+                 "(horizontal)" if t["aspect"] > 1.2 else
+                 "(upright)" if t["aspect"] < 0.7 else "", t["det_score"])
     log.info("")
     log.info("Tell me the number, or seed it directly:")
     if table:
