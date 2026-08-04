@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from approve_tracking import approval_valid  # noqa: E402
 from build_workflows import graph_name  # noqa: E402
 from comfy_client import ComfyClient, load_api_workflow, set_input  # noqa: E402
 from common import (  # noqa: E402
@@ -221,6 +222,40 @@ def main() -> int:
     if not chunks:
         log.info("Nothing to do: no chunk matched the selection.")
         return 0
+
+    # ---- refuse to generate on unsettled tracking ----------------------------
+    # A chunk costs ~18 minutes of GPU. Previously an ambiguous or unreviewed
+    # track was logged and then generated on anyway, which is how a confidently
+    # tracked WRONG PERSON reached four finished variants. Ambiguity is a stop,
+    # not a note.
+    if use_mask:
+        blocked: list[str] = []
+        for sid in sorted({c["shot_id"] for c in chunks}):
+            shot = next((s for s in man["shots"] if s["shot_id"] == sid), {})
+            st = shot.get("subject_status", "pending")
+            if st in ("needs_user", "failed", "pending"):
+                blocked.append(f"{sid}: subject_status={st}")
+            elif not approval_valid(shot):
+                blocked.append(
+                    f"{sid}: tracking has not been approved"
+                    if not shot.get("tracking_approved") else
+                    f"{sid}: the approval is STALE - the mask has been "
+                    f"re-tracked since it was given, so nobody has seen these "
+                    f"pixels")
+        if blocked:
+            log.error("Refusing to generate: the tracked subject is not settled "
+                      "for %d shot(s). Nothing was generated.", len(blocked))
+            for b in blocked:
+                log.error("  %s", b)
+            log.error("Look at intermediate/masks/review/<shot>_review.png and "
+                      "confirm the highlighted figure is the right person.")
+            log.error("Then either re-seed it:")
+            log.error("  scripts/track_subject.py --shot <shot> --init-box "
+                      "x0,y0,x1,y1 --seed-frame N")
+            log.error("or, if the automatic track is already correct, record "
+                      "that judgement:")
+            log.error("  scripts/approve_tracking.py --shot <shot>")
+            return 1
 
     use_bg = bool(args.background)
     if use_bg and not use_mask:

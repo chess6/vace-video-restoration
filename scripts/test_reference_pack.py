@@ -325,6 +325,188 @@ def test_yaw_is_a_head_measurement(f: Failures) -> None:
             "yaw changed when the face was moved and scaled")
 
 
+# ---------------------------------------------------------------------------
+# multi-person references: the failure that tracked the wrong person
+# ---------------------------------------------------------------------------
+
+class FakeImage:
+    """A stand-in for a decoded photograph. resolve_targets only needs its size
+    and its identity; the face records are supplied directly."""
+
+    def __init__(self, name, w=1000, h=800):
+        self.filename, self.width, self.height = name, w, h
+
+    @property
+    def size(self):
+        return (self.width, self.height)
+
+    def convert(self, _mode):
+        return self
+
+
+class Quiet:
+    def info(self, *a):
+        pass
+    warning = error = info
+
+
+def run_resolve(table, exclusions=None):
+    """Drive identity.resolve_targets over a scripted set of face instances."""
+    import identity
+    import PIL.ImageOps as IO
+    from PIL import Image as PILImage
+    real = (identity.face_instances, PILImage.open, IO.exif_transpose)
+    identity.face_instances = (
+        lambda models, pil, detect_people=True: [dict(r) for r in table[pil.filename]])
+    PILImage.open = lambda p: FakeImage(Path(p).stem)
+    IO.exif_transpose = lambda im: im
+    try:
+        return identity.resolve_targets([Path(f"{k}.jpg") for k in table], None,
+                                        Quiet(), exclusions)
+    finally:
+        identity.face_instances, PILImage.open, IO.exif_transpose = real
+
+
+def inst(emb, face_frac=0.02, person=None):
+    return {"face": np.asarray(emb, np.float32), "box": [0, 0, 50, 50],
+            "face_frac": face_frac, "person_box": person, "kps": None,
+            "det_score": 0.9}
+
+
+def test_wrong_person_is_not_the_target(f: Failures) -> None:
+    """Two photographs where the WRONG person is larger and more prominent.
+
+    This is the case that put a stranger through four generations. The old rule
+    took the largest person and the largest face per image; here that is the
+    wrong person in both, and neither of those images shows the target's face at
+    a size any detector would prefer.
+    """
+    rng = np.random.default_rng(3)
+    target = np.array([1.0] + [0.0] * 15)
+    other = np.array([0.0, 1.0] + [0.0] * 14)
+
+    def emb(base, j=0.05):
+        v = base + rng.normal(0, j, 16)
+        return v / np.linalg.norm(v)
+
+    table = {f"t{i}": [inst(emb(target), 0.02, [0, 0, 200, 400])]
+             for i in range(10)}
+    for i in range(2):
+        table[f"m{i}"] = [
+            inst(emb(other), 0.20, [300, 50, 800, 790]),    # larger, in front
+            inst(emb(target), 0.001, [10, 100, 120, 500]),  # tiny, the target
+        ]
+
+    res = run_resolve(table)
+    f.check(res["bank"] is not None and len(res["bank"]) >= 10,
+            f"the target bank has "
+            f"{0 if res['bank'] is None else len(res['bank'])} face(s); the ten "
+            f"clean photographs should all be usable")
+    f.check(res["images"] >= 10,
+            f"the dominant cluster spans {res['images']} image(s). It must be "
+            f"the identity in the MOST IMAGES, not the one with the biggest "
+            f"faces - the wrong person appears in only two")
+
+    # The wrong person's face must never enter the bank at all.
+    if res["bank"] is not None:
+        worst = float(np.max(res["bank"] @ (other / np.linalg.norm(other))))
+        f.check(worst < 0.5,
+                f"a bank embedding matches the WRONG person at {worst:.2f}")
+
+    for i in range(2):
+        name = f"m{i}.jpg"
+        # These MUST be usable. The two faces in them are plainly different
+        # people, so there is nothing ambiguous to refuse - and recovering the
+        # target from an image where someone else is larger is the whole point.
+        # Detecting only the largest face per image drops the target here and
+        # loses the photograph entirely.
+        if not f.check(name in res["per_image"],
+                       f"{name}: the target was not recovered from an image "
+                       f"where another person is larger; only one face per "
+                       f"image was considered"):
+            continue
+        rec = res["per_image"][name]
+        chosen = rec["instance"]
+        f.check(float(chosen["face"] @ target) > float(chosen["face"] @ other),
+                f"{name}: the LARGER wrong person was selected as the target - "
+                f"the exact failure that produced a wrong-person track")
+        f.check(chosen["face_frac"] < 0.01,
+                f"{name}: selection followed face SIZE rather than identity")
+        f.check(rec["other_people"] >= 1,
+                f"{name}: the second person was not even noticed")
+        f.check(rec["person_box"] == [10, 100, 120, 500],
+                f"{name}: the target face was tied to the wrong person box, so "
+                f"a tracker seeded from it would follow the wrong figure")
+
+
+def test_ambiguous_image_is_rejected(f: Failures) -> None:
+    """Two faces the embeddings cannot separate - refuse, do not guess."""
+    base = np.array([1.0] + [0.0] * 15)
+    near = base + np.array([0.0, 0.25] + [0.0] * 14)
+    near = near / np.linalg.norm(near)
+
+    res = run_resolve({"a": [inst(base)], "b": [inst(base)],
+                       "c": [inst(base), inst(near)]})
+    rejected = {n for n, _ in res["rejected"]}
+    f.check("c.jpg" in rejected,
+            "an image with two indistinguishable faces was used anyway; with a "
+            "second person present, guessing is how the wrong one gets tracked")
+    f.check({"a.jpg", "b.jpg"} <= set(res["per_image"]),
+            "unambiguous images were discarded along with the ambiguous one")
+
+
+def test_excluded_images_never_reach_the_bank(f: Failures) -> None:
+    """The run-specific exclusion list must actually keep them out."""
+    target = np.array([1.0] + [0.0] * 15)
+    other = np.array([0.0, 1.0] + [0.0] * 14)
+    table = {f"t{i}": [inst(target)] for i in range(4)}
+    table["w0"] = [inst(other)]
+    table["w1"] = [inst(other)]
+
+    res = run_resolve(table, exclusions={"w0.jpg", "w1.jpg"})
+    f.check(not ({"w0.jpg", "w1.jpg"} & set(res["per_image"])),
+            "an excluded image still contributed to the identity bank")
+    f.check(len(res["per_image"]) == 4,
+            f"{len(res['per_image'])} image(s) usable, expected the 4 kept ones")
+
+
+def test_exclusions_are_untracked_and_effective(f: Failures) -> None:
+    import identity
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / identity.EXCLUSIONS
+        p.write_text("# a comment\n\nfoo.jpg\nbar.png  # trailing\n")
+        real = identity.P.intermediate
+        try:
+            identity.P.intermediate = Path(td)
+            got = identity.load_exclusions()
+        finally:
+            identity.P.intermediate = real
+    f.check(got == {"foo.jpg", "bar.png"},
+            f"exclusion parsing produced {got}")
+
+
+def test_apparel_is_not_identity(f: Failures) -> None:
+    """Arms and legs must not be conditioned from external photographs.
+
+    How much arm or leg is visible is a fact about what someone is WEARING. A
+    reference with bare arms instructs the model to produce bare arms, which
+    removes the source's sleeves.
+    """
+    from make_reference_pack import COVERING, GARMENT, IDENTITY_ONLY
+    for limb in ("left_arm", "right_arm", "left_leg", "right_leg"):
+        f.check(limb not in IDENTITY_ONLY,
+                f"{limb} is still conditioned from external photographs; its "
+                f"visibility is sleeve/hemline coverage, which belongs to the "
+                f"source")
+    f.check(not (IDENTITY_ONLY & GARMENT), "a garment class is conditionable")
+    f.check(not (IDENTITY_ONLY & COVERING),
+            "a face/head covering class is conditionable, so an external "
+            "uncovered face could remove the source's covering")
+    f.check(IDENTITY_ONLY == {"hair", "face"},
+            f"IDENTITY_ONLY is {sorted(IDENTITY_ONLY)}; only head regions may "
+            f"come from an external photograph")
+
+
 def main() -> int:
     f = Failures()
     for t in (test_class_partition, test_masking_removes_clothing,
@@ -333,7 +515,12 @@ def main() -> int:
               test_midrun_change_cannot_be_recorded_current,
               test_consensus_beats_duplicate_outliers,
               test_consensus_survives_background_and_outfit_changes,
-              test_yaw_is_a_head_measurement):
+              test_yaw_is_a_head_measurement,
+              test_wrong_person_is_not_the_target,
+              test_ambiguous_image_is_rejected,
+              test_exclusions_are_untracked_and_effective,
+              test_excluded_images_never_reach_the_bank,
+              test_apparel_is_not_identity):
         t(f)
     skipped = [m for m in f if m.startswith("SKIPPED")]
     real = [m for m in f if not m.startswith("SKIPPED")]

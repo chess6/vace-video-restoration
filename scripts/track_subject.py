@@ -7,11 +7,14 @@ the script only asks for help on genuinely ambiguous shots.
 Per shot:
   1. Sample representative frames.
   2. Detect every person with Grounding DINO (open-vocabulary).
-  3. Score each candidate against the supplied references using
-       - ArcFace identity similarity when a face is visible, and
-       - CLIP appearance similarity (clothing, hair, colour, silhouette,
-         accessories) when the face is small, turned away or occluded.
-     The two are fused, weighted by how reliable the face signal is on that crop.
+  3. Score each candidate against the target's verified reference faces
+     (scripts/identity.py) using ArcFace similarity ONLY.
+
+     Clothing-sensitive appearance similarity used to stand in when no face was
+     visible. That is backwards: when the face cannot be seen is exactly when
+     clothing similarity is least able to tell two people apart. A candidate
+     with no resolvable face now scores nothing and the shot is flagged for a
+     human rather than tracked on a guess.
   4. Take the highest-confidence candidate, initialise SAM 2.1 from its generated
      box, and track the WHOLE FIGURE (not just the face) through the shot.
   5. Re-detect and re-seed after tracking-confidence loss, disappearance,
@@ -142,8 +145,9 @@ class Models:
                 self._face = app
                 self.log.info("Face identity: insightface buffalo_l (%s)", providers[0])
             except Exception as e:
-                self.log.warning("insightface unavailable (%s). Matching will use "
-                                 "appearance embeddings only.", e)
+                self.log.warning("insightface unavailable (%s). Identity cannot "
+                                 "be established at all; shots will be flagged "
+                                 "for manual seeding rather than guessed.", e)
                 self._face = False
         return self._face or None
 
@@ -208,82 +212,63 @@ class Models:
 # ---------------------------------------------------------------------------
 
 def build_identity_bank(models: Models, log) -> dict:
-    """Face + appearance embeddings of the target figure, from inputs/references/."""
-    from PIL import Image, ImageOps
+    """Face embeddings of the ONE person being restored.
 
-    prov_path = P.reference_sheets / "reference_provenance.json"
-    files: list[Path] = []
-    if prov_path.exists():
-        prov = json.loads(prov_path.read_text())
-        files = [Path(s["file"]) for s in prov.get("selected", [])]
-        log.info("Identity bank from the %d reference view(s) chosen by "
-                 "prepare_references.py", len(files))
-    if not files:
-        files = sorted(p for p in P.references.iterdir()
-                       if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
-        log.info("Identity bank from all %d image(s) in inputs/references/", len(files))
+    Delegates to scripts/identity.py so tracking, pack selection and evaluation
+    all mean the same thing by "the target". See that module for why the old
+    largest-person/largest-face-per-image approach let a second person in.
+
+    There is deliberately no appearance bank any more. It was a CLIP embedding
+    of the largest person crop, which responds to clothing, background and
+    framing rather than to who someone is - and because the face term is
+    down-weighted when the face is small, that appearance term DOMINATED at low
+    resolution. Two photographs of a different person, neither with a detectable
+    target face, were enough to carry the selection.
+    """
+    from identity import load_exclusions, reference_files, resolve_targets
+
+    files = reference_files()
     if not files:
         raise RuntimeError(
-            f"No reference images in {P.references}. Identity-aware selection needs "
-            "at least one. Add references and run scripts/prepare_references.py.")
-
-    face_embs, app_embs, used = [], [], []
-    for f in files:
-        try:
-            im = ImageOps.exif_transpose(Image.open(f)).convert("RGB")
-        except Exception as e:
-            log.warning("skip %s: %s", f.name, e)
-            continue
-        boxes = models.detect_people(im)
-        crop = im.crop(tuple(int(v) for v in boxes[0][:4])) if boxes else im
-        emb, _, _ = models.face_embed(im)
-        if emb is not None:
-            face_embs.append(emb)
-        app_embs.append(models.clip_embed([crop])[0])
-        used.append(str(f))
-
-    bank = {
-        "face": np.stack(face_embs) if face_embs else None,
-        "appearance": np.stack(app_embs) if app_embs else None,
-        "files": used,
-    }
-    log.info("Identity bank: %d face embedding(s), %d appearance embedding(s)",
-             0 if bank["face"] is None else len(bank["face"]),
-             0 if bank["appearance"] is None else len(bank["appearance"]))
-    if bank["face"] is None:
-        log.warning("No face found in any reference image. Matching will rely on "
-                    "appearance only, which is weaker when clothing is common.")
-    return bank
+            f"No reference images in {P.references}. Identity-aware selection "
+            "needs at least one. Add references and run "
+            "scripts/prepare_references.py.")
+    res = resolve_targets(files, models, log, load_exclusions(log))
+    if res["bank"] is None:
+        raise RuntimeError(
+            "No usable target face in any reference image. Identity cannot be "
+            "established, and tracking on appearance alone is what put the "
+            "wrong person in the last run. Add a reference showing the target's "
+            "face, or seed the shot manually with --init-box / --init-points.")
+    log.info("Identity bank: %d verified target face(s) from %d image(s)",
+             len(res["bank"]), len(res["per_image"]))
+    return {"face": res["bank"],
+            "files": [str(v["file"]) for v in res["per_image"].values()],
+            "per_image": res["per_image"],
+            "rejected": res["rejected"]}
 
 
 def score_candidate(models: Models, bank: dict, crop) -> dict:
-    """Fuse face identity and appearance similarity into one confidence."""
-    face_sim = None
+    """Is this crop the target? Face evidence only.
+
+    Appearance similarity used to fill in when no face was resolvable, which
+    sounds like graceful degradation and is really the opposite: it is precisely
+    when the face cannot be seen that clothing similarity is least trustworthy
+    and most likely to pick a stranger. A candidate with no usable face now
+    scores nothing and the shot is flagged for a human, rather than tracked on a
+    guess.
+    """
     femb, _, face_frac = models.face_embed(crop)
-    if femb is not None and bank["face"] is not None:
-        face_sim = float(np.max(bank["face"] @ femb))
-
-    app_sim = None
-    if bank["appearance"] is not None:
-        aemb = models.clip_embed([crop])[0]
-        app_sim = float(np.max(bank["appearance"] @ aemb))
-
-    # Face is far more discriminative, but only when the face is actually
-    # resolvable in the crop. Weight it by apparent face size, so a 6-pixel face
-    # on a 240p source cannot dominate the decision.
-    if face_sim is not None:
-        w_face = float(np.clip(face_frac / 0.02, 0.0, 1.0)) * 0.75
-    else:
-        w_face = 0.0
-    if app_sim is None:
-        fused = face_sim if face_sim is not None else 0.0
-    elif face_sim is None:
-        fused = app_sim
-    else:
-        fused = w_face * face_sim + (1 - w_face) * app_sim
-
-    return {"fused": float(fused), "face_sim": face_sim, "app_sim": app_sim,
-            "face_frac": face_frac, "face_weight": w_face}
+    if femb is None or bank.get("face") is None:
+        return {"fused": 0.0, "face_sim": None, "face_frac": face_frac,
+                "reason": "no face resolvable in this candidate"}
+    face_sim = float(np.max(bank["face"] @ femb))
+    # Confidence is the similarity itself, discounted when the face is so small
+    # that the embedding is mostly interpolation. Never promoted by anything
+    # else: there is nothing else here to promote it.
+    scale = float(np.clip(face_frac / 0.005, 0.0, 1.0))
+    return {"fused": float(face_sim * scale), "face_sim": face_sim,
+            "face_frac": face_frac, "face_scale": scale}
 
 
 # ---------------------------------------------------------------------------
@@ -784,18 +769,29 @@ def main() -> int:
                       "frames_probed": len(per_frame),
                       **{k: (round(v, 4) if isinstance(v, float) else v)
                          for k, v in best.items() if k != "box"}}
-            log.info("%s: best candidate frame=%d fused=%.3f (face=%s app=%s "
-                     "face_w=%.2f) worst margin=%.3f at frame %d over %d candidates",
+            n_faced = sum(1 for c in all_cands if c.get("face_sim") is not None)
+            log.info("%s: best candidate frame=%d confidence=%.3f (face match %s, "
+                     "face %.2f%% of crop) worst margin=%.3f at frame %d over %d "
+                     "candidate(s), %d with a resolvable face",
                      sid, seed_frame, conf,
-                     f"{best['face_sim']:.3f}" if best["face_sim"] is not None else "n/a",
-                     f"{best['app_sim']:.3f}" if best["app_sim"] is not None else "n/a",
-                     best["face_weight"], margin, worst_frame, len(all_cands))
+                     f"{best['face_sim']:.3f}" if best.get("face_sim") is not None
+                     else "NONE", 100 * (best.get("face_frac") or 0.0), margin,
+                     worst_frame, len(all_cands), n_faced)
+            if n_faced == 0:
+                log.warning("%s: NO candidate had a resolvable face. There is no "
+                            "identity evidence in this shot at all. Clothing "
+                            "similarity is not used as a substitute - that is "
+                            "what tracked the wrong person before.", sid)
 
-            if conf < AUTO_ACCEPT or margin < AMBIGUOUS_MARGIN:
-                reason = ("low confidence" if conf < AUTO_ACCEPT
-                          else "ambiguous: two candidates score alike")
-                log.warning("%s: %s (conf=%.3f margin=%.3f). Tracking anyway so you "
-                            "have something to inspect, but flagging for review.",
+            if conf < AUTO_ACCEPT or margin < AMBIGUOUS_MARGIN or n_faced == 0:
+                reason = ("no identity evidence: no candidate had a resolvable face"
+                          if n_faced == 0 else
+                          "low confidence" if conf < AUTO_ACCEPT else
+                          "ambiguous: two candidates score alike")
+                log.warning("%s: %s (conf=%.3f margin=%.3f). A mask is still "
+                            "written so you have something to LOOK AT, but it is "
+                            "flagged needs_user and generation will refuse to "
+                            "run on it. Seed it with --init-box or --init-points.",
                             sid, reason, conf, margin)
                 shot["subject_status"] = "needs_user"
                 shot["subject_note"] = reason

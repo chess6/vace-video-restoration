@@ -67,11 +67,24 @@ LBL = {0: "background", 1: "hat", 2: "hair", 3: "sunglasses", 4: "upper",
 GARMENT = {"hat", "upper", "skirt", "pants", "dress", "belt", "left_shoe",
            "right_shoe", "bag", "scarf"}
 SKIN = {"face", "left_leg", "right_leg", "left_arm", "right_arm"}
-# What an EXTERNAL photograph is allowed to condition: identity only. Its
-# clothing belongs to a different day and must never reach the model, because
-# VACE will happily treat it as the garment to draw. Sunglasses and hats are
-# excluded too - they are accessories of that other appearance, not identity.
-IDENTITY_ONLY = {"hair", "face", "left_leg", "right_leg", "left_arm", "right_arm"}
+# What an EXTERNAL photograph is allowed to condition.
+#
+# Narrowed to head only. Arms and legs were in this set on the reasoning that
+# bare skin is "identity", but they are not: how much arm or leg is visible is a
+# fact about what the person is WEARING that day. A reference showing bare arms
+# tells the model to produce bare arms, and if the source has sleeves it has
+# just been instructed to remove them. Same for legs and hemlines. Sleeve and
+# torso coverage belong to the source, exactly like the garment itself.
+#
+# Hats, sunglasses and scarves stay out too - accessories of another day.
+IDENTITY_ONLY = {"hair", "face"}
+
+# Head classes, used to ask what the SOURCE actually exposes before any external
+# face is allowed to condition anything. A face covering in the source is part of
+# what the person is wearing; an external photograph showing an uncovered face
+# must never be read as permission to remove it.
+HEAD = {"hair", "face", "hat", "sunglasses", "scarf"}
+COVERING = {"hat", "sunglasses", "scarf"}
 
 
 def identity_regions(labels: np.ndarray) -> np.ndarray:
@@ -140,13 +153,27 @@ class Parser:
 
     def parse(self, pil):
         """Returns a HxW label map at the image's own resolution."""
+        return self.parse_prob(pil)[0]
+
+    def parse_prob(self, pil):
+        """(labels, confidence) - the softmax probability of the winning class.
+
+        Confidence is what makes failing closed possible. An argmax alone says
+        "face" just as firmly at 0.31 as at 0.99, and a garment region the parser
+        is unsure about looks exactly like an exposed one. Regenerating only
+        where the parser is certain is the difference between improving a face
+        and erasing a sleeve.
+        """
         import torch
         with torch.inference_mode():
             inp = self.proc(images=pil, return_tensors="pt").to(self.dev)
             logits = self.model(**inp).logits
             up = torch.nn.functional.interpolate(
                 logits, size=pil.size[::-1], mode="bilinear", align_corners=False)
-        return up.argmax(dim=1)[0].cpu().numpy().astype(np.uint8)
+            prob = torch.softmax(up, dim=1)[0]
+            conf, lab = prob.max(dim=0)
+        return (lab.cpu().numpy().astype(np.uint8),
+                conf.cpu().numpy().astype(np.float32))
 
 
 def palette(rgb: np.ndarray, labels: np.ndarray) -> dict:
