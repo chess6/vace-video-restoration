@@ -60,13 +60,25 @@ def alpha_from_mask(mask_u8: np.ndarray, band_px: int, center: bool) -> np.ndarr
 
 
 def composite(subject: Path, background: Path, mask: Path, out: Path,
-              band_px: int, center: bool, fps: int, log) -> dict:
-    """Per-frame alpha composite. Streams; never holds the clip in RAM."""
+              band_px: int, center: bool, fps: int, log,
+              occluders: Path | None = None) -> dict:
+    """Per-frame alpha composite, in explicit layer order. Streams to disk.
+
+        1. restored environment (background plate)
+        2. generated target figure
+        3. preserved foreground: occluders, held objects, other people
+
+    Layer 3 is taken from the plate, never regenerated. Without it the figure is
+    pasted over anyone crossing in front of it, which reads as broken interaction
+    however good the figure itself looks.
+    """
     import cv2
     import subprocess
 
-    caps = {n: cv2.VideoCapture(str(p))
-            for n, p in (("subject", subject), ("background", background), ("mask", mask))}
+    srcs = {"subject": subject, "background": background, "mask": mask}
+    if occluders is not None:
+        srcs["occ"] = occluders
+    caps = {n: cv2.VideoCapture(str(p)) for n, p in srcs.items()}
     for n, c in caps.items():
         if not c.isOpened():
             raise RuntimeError(f"cannot open {n}: {locals()[n] if n in locals() else n}")
@@ -92,6 +104,14 @@ def composite(subject: Path, background: Path, mask: Path, out: Path,
                 f"frame {n}: subject {fs.shape[:2]}, background {fb.shape[:2]}, "
                 f"mask {fm.shape[:2]} disagree")
         a = alpha_from_mask(cv2.cvtColor(fm, cv2.COLOR_BGR2GRAY), band_px, center)
+        if "occ" in caps:
+            oko, fo = caps["occ"].read()
+            if oko:
+                # Layer 3: anything in front of the subject wins. Hard-edged on
+                # purpose - these pixels are the ORIGINAL, and feathering them
+                # would blend the generated figure back over the occluder.
+                occ = cv2.cvtColor(fo, cv2.COLOR_BGR2GRAY) > 127
+                a[occ] = 0.0
         alpha_sum += float(a.mean())
         a3 = a[:, :, None]
         blended = (fs.astype(np.float32) * a3 + fb.astype(np.float32) * (1.0 - a3))
@@ -123,6 +143,9 @@ def main() -> int:
     ap.add_argument("--background", type=Path, required=True, help="Restored plate")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--band-px", type=int, default=None)
+    ap.add_argument("--occluders", type=Path, default=None,
+                    help="Foreground mask kept ABOVE the generated figure. "
+                         "Defaults to the shot's occluder mask when it exists.")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -153,8 +176,17 @@ def main() -> int:
     log.info("Compositing %s: %d frames, band %d px, centred=%s",
              args.chunk, ns["subject"], band, comp.get("center_band", True))
 
+    occ = args.occluders
+    if occ is None:
+        shot = next((s for s in man["shots"] if s["shot_id"] == c["shot_id"]), {})
+        rec = (shot or {}).get("occluders") or {}
+        cand = P.root / rec["path"] if rec.get("path") else None
+        occ = cand if cand and cand.exists() else None
+    if occ is not None:
+        log.info("Foreground layer: %s kept above the generated figure", rel(occ))
     composite(args.subject, args.background, mask, args.out, band,
-              bool(comp.get("center_band", True)), int(c["fps"]), log)
+              bool(comp.get("center_band", True)), int(c["fps"]), log,
+              occluders=occ)
     return 0
 
 

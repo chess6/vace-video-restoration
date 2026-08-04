@@ -108,7 +108,21 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=None,
                     help="Output directory (default intermediate/clips)")
     ap.add_argument("--force", action="store_true", help="Re-cut clips that already exist")
+    ap.add_argument("--start", type=float, default=None,
+                    help="Exact start second. With --end this cuts ONE named "
+                         "interval instead of drawing a random window, which is "
+                         "what a reproducible pilot needs.")
+    ap.add_argument("--end", type=float, default=None, help="Exact end second")
     args = ap.parse_args()
+
+    if (args.start is None) != (args.end is None):
+        ap.error("--start and --end must be given together")
+    exact = args.start is not None
+    if exact:
+        if args.end <= args.start:
+            ap.error(f"--end ({args.end}) must be after --start ({args.start})")
+        if not args.sources or len(args.sources) != 1:
+            ap.error("an exact interval needs exactly one --sources file")
 
     log = setup_logging("sample_clips")
     require_tools("ffmpeg", "ffprobe")
@@ -138,8 +152,21 @@ def main() -> int:
             lo, hi = 0.0, max(0.0, info["duration"] - dur)
         # Draw first regardless of --force, so one source being skipped does not
         # shift the offsets drawn for the others.
-        start = round(rng.uniform(lo, hi) * fps) / fps
-        dst = out_dir / f"{src.stem}_clip{int(round(args.seconds))}s.mp4"
+        if exact:
+            if args.end > info["duration"] + 1e-6:
+                log.error("%s is %.2fs long; --end %.2f is past the end",
+                          src.name, info["duration"], args.end)
+                return 1
+            # Snap to a frame boundary so the cut is reproducible to the frame,
+            # and take the frame count from the requested span rather than
+            # --seconds, which the caller may not have matched.
+            start = round(args.start * fps) / fps
+            n_frames = max(1, round((args.end - args.start) * fps))
+            dur = n_frames / fps
+            dst = out_dir / f"{src.stem}_{args.start:g}-{args.end:g}s.mp4"
+        else:
+            start = round(rng.uniform(lo, hi) * fps) / fps
+            dst = out_dir / f"{src.stem}_clip{int(round(args.seconds))}s.mp4"
 
         if dst.exists() and not args.force:
             log.info("%-28s exists, skipping (use --force to re-cut)", dst.name)
@@ -152,6 +179,7 @@ def main() -> int:
 
         if dst.exists():
             entries.append({
+                "exact_interval": bool(exact),
                 "source": src.name,
                 "clip": str(dst.relative_to(P.root)),
                 "start_sec": round(start, 6),

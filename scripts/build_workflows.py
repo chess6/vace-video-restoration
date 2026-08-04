@@ -464,6 +464,49 @@ def seedvr2_target_size(w: int, h: int, short_edge: int) -> tuple[int, int]:
     return (int(round(w * scale / 2) * 2), int(round(h * scale / 2) * 2))
 
 
+def graph_pose(cfg: dict) -> Graph:
+    """Whole-body pose control: body, hands and face landmarks.
+
+    Depth carries volume and occlusion but renders articulation poorly at this
+    source resolution - fingers and limb crossings blur into one another, which
+    is what makes contact and interaction wrong. SDPose gives explicit joints,
+    including hands and face, which is the missing signal.
+
+    This is an ALTERNATIVE control profile, not something to blend with depth.
+    VACE is trained on individual control representations; averaging two of them
+    produces an input the model has never seen. The pilot compares them.
+
+    Native to the pinned ComfyUI (comfy_extras/nodes_sdpose.py); the checkpoint
+    is a normal ComfyUI checkpoint, so it loads through CheckpointLoaderSimple.
+    """
+    v = cfg["video"]
+    c = cfg.get("pose", {})
+    g = Graph("sdpose_wholebody",
+              "SDPose whole-body (body + hands + face) control video for VACE")
+    ck = g.add(N("CheckpointLoaderSimple", "SDPose whole-body",
+                 ckpt_name=c.get("model", "sdpose_wholebody_fp16.safetensors")))
+    src_v = g.add(N("LoadVideo", "Source chunk", file="pose_source.mp4"))
+    src = g.add(N("GetVideoComponents", "Source frames", video=src_v()))
+    kp = g.add(N("SDPoseKeypointExtractor", "Extract whole-body keypoints",
+                 model=ck(0), vae=ck(2), image=src(),
+                 batch_size=int(c.get("batch_size", 8))))
+    draw = g.add(N("SDPoseDrawKeypoints", "Render skeleton",
+                   keypoints=kp(0),
+                   draw_body=bool(c.get("draw_body", True)),
+                   draw_hands=bool(c.get("draw_hands", True)),
+                   draw_face=bool(c.get("draw_face", True)),
+                   draw_feet=bool(c.get("draw_feet", True)),
+                   draw_head=bool(c.get("draw_head", True)),
+                   stick_width=int(c.get("stick_width", 4)),
+                   face_point_size=int(c.get("face_point_size", 3)),
+                   score_threshold=float(c.get("score_threshold", 0.3))))
+    vid = g.add(N("CreateVideo", "Assemble frames", images=draw(),
+                  fps=float(v["model_fps"])))
+    g.add(N("SaveVideo", "Save pose control", video=vid(),
+            filename_prefix="pose/wholebody", format="auto", codec="auto"))
+    return g
+
+
 def graph_smoke(cfg: dict) -> Graph:
     """Smallest graph that still exercises every model and the VACE node itself."""
     v = cfg["video"]
@@ -517,6 +560,8 @@ def main() -> int:
                for r in (True, False)]
     if cfg.get("background", {}).get("enabled"):
         graphs += [graph_seedvr2(cfg, p) for p in cfg["background"]["profiles"]]
+    if cfg.get("pose", {}).get("enabled"):
+        graphs.append(graph_pose(cfg))
     graphs.append(graph_smoke(cfg))
 
     for g in graphs:

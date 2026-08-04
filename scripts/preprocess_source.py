@@ -27,8 +27,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     P, VIDEO_EXTS, Chunk, Shot, ffprobe_json, find_single, human_size, human_time,
-    load_config, nearest_valid_length, parse_fraction, rel, require_tools,
-    round_to_16, run, save_manifest, setup_logging,
+    load_config, nearest_valid_length, parse_fraction, probe_frames, rel,
+    require_tools, round_to_16, run, save_manifest, setup_logging,
 )
 
 
@@ -226,8 +226,42 @@ def main() -> int:
     p = run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
              "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(work)])
     total_frames = int(p.stdout.strip())
+    real_frames = total_frames
     log.info("Working stream: %sx%s, %d frames, %.4f s",
              wvs["width"], wvs["height"], total_frames, total_frames / model_fps)
+
+    # ---- 2b. tail-pad a short stream up to one legal inference length --------
+    # A stream just under the chunk size used to be split into two nearly
+    # identical windows - 80 frames became 0-77 and 3-80, a 74-frame overlap and
+    # two full generations for one 5 s clip. VACE lengths are 4n+1, so instead
+    # hold the last frame for a few frames and generate ONCE. The padding is
+    # dropped again when the interval is cropped, so no padded frame reaches the
+    # output. Only done when the whole stream fits a single chunk and there is no
+    # cut to respect.
+    chunk_frames_cfg = int(v["chunk_frames"])
+    if real_frames < chunk_frames_cfg and (real_frames - 1) % 4 != 0:
+        padded = nearest_valid_length(real_frames)
+        if padded < real_frames:
+            padded += 4
+        if padded <= chunk_frames_cfg:
+            pad_n = padded - real_frames
+            work_padded = P.normalized / (work.stem + f"_pad{padded}.mp4")
+            if args.force or not work_padded.exists():
+                log.info("Tail-padding %d -> %d frames (hold the last frame %d "
+                         "time(s)) so this clip is ONE %d-frame inference instead "
+                         "of two overlapping ones.", real_frames, padded, pad_n,
+                         padded)
+                run(["ffmpeg", "-y", "-v", "error", "-i", str(work), "-vf",
+                     f"tpad=stop_mode=clone:stop_duration={pad_n / model_fps:.6f}",
+                     "-r", str(model_fps), "-vsync", "cfr",
+                     "-c:v", "libx264", "-crf", "14", "-preset", "medium",
+                     "-pix_fmt", "yuv420p", "-an", str(work_padded)], log)
+            got = probe_frames(work_padded)
+            if got != padded:
+                raise RuntimeError(f"tail-pad produced {got} frames, wanted {padded}")
+            work, total_frames = work_padded, padded
+            log.info("Working stream is now %d frames (%d real + %d padding)",
+                     total_frames, real_frames, pad_n)
 
     # ---- 3. scene detection --------------------------------------------------
     from scenedetect import open_video, SceneManager
@@ -298,6 +332,8 @@ def main() -> int:
             "interlaced": interlaced,
         },
         "normalized": {
+            "real_frames": int(real_frames),
+            "pad_frames": int(total_frames - real_frames),
             "cfr_path": str(cfr.relative_to(P.root)),
             "work_path": str(work.relative_to(P.root)),
             "width": tgt_w, "height": tgt_h, "fps": model_fps,

@@ -29,8 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_workflows import graph_name  # noqa: E402
 from comfy_client import ComfyClient, load_api_workflow, set_input  # noqa: E402
 from common import (  # noqa: E402
-    P, assert_aligned, check_geometry, human_time, load_config, load_manifest,
-    probe_frames, rel, run, save_manifest, setup_logging, slice_frames,
+    P, assert_aligned, check_geometry, file_digest, generation_key, human_time,
+    load_config, load_manifest, probe_frames, rel, run, save_manifest,
+    setup_logging, slice_frames,
 )
 
 # Key under which the unablated run is recorded. Its fields are also mirrored to
@@ -42,6 +43,8 @@ BASELINE = "baseline"
 def default_tag(args) -> str:
     """Name the variant from the flags that make it one. Empty for the baseline."""
     parts = []
+    if getattr(args, "roi", False):
+        parts.append("roi")
     if getattr(args, "background", None):
         # Short, stable name: "bg_conservative" from "background_conservative".
         parts.append("bg_" + args.background.replace("background_", ""))
@@ -124,6 +127,9 @@ def main() -> int:
                      help="Ablation: drop the reference sheet ONLY, keeping the mask")
     var.add_argument("--no-mask", action="store_true",
                      help="Ablation: drop the subject mask ONLY, keeping the reference")
+    var.add_argument("--roi", action="store_true",
+                     help="Generate on the stabilized subject crop instead of the "
+                          "full frame (scripts/make_roi.py must have run)")
     var.add_argument("--background", default=None, metavar="PROFILE",
                      help="Preserve a SeedVR2-restored plate instead of the "
                           "original outside the mask (background profile name)")
@@ -176,15 +182,8 @@ def main() -> int:
                   "--limit, --resume-failed, or --all.")
         return 1
 
-    if not args.redo:
-        # "skipped" means a shot with no subject in it: there is nothing to
-        # regenerate, and assembly passes the original frames through.
-        chunks = [c for c in chunks if run_status(c, variant) not in ("done", "skipped")]
-    if args.limit:
-        chunks = chunks[:args.limit]
     if not chunks:
-        log.info("Nothing to do: no chunks matched (variant %r already done?). "
-                 "Pass --redo to regenerate.", variant)
+        log.info("Nothing to do: no chunk matched the selection.")
         return 0
 
     use_bg = bool(args.background)
@@ -199,13 +198,88 @@ def main() -> int:
         return 1
     log.info("Workflow: %s (mask=%s reference=%s)", wf_name, use_mask, use_ref)
     log.info("Variant: %s", variant)
-    log.info("Chunks to process: %d", len(chunks))
 
-    ref_sheet = P.reference_sheets / "reference_sheet.png"
-    if use_ref and not ref_sheet.exists():
-        log.error("Reference sheet missing: %s. Run scripts/prepare_references.py",
-                  ref_sheet)
-        return 1
+    # Per-shot reference pack when one exists, global sheet otherwise. The pack
+    # is per APPEARANCE: it never mixes two outfits into one conditioning image,
+    # and its clothing panel comes from this interval rather than from a
+    # photograph taken elsewhere.
+    def sheet_for(c: dict) -> Path:
+        shot = next((s for s in man["shots"] if s["shot_id"] == c["shot_id"]), None)
+        pack = (shot or {}).get("reference_pack") or {}
+        if pack.get("sheet"):
+            cand = P.root / pack["sheet"]
+            if cand.exists():
+                return cand
+        return P.reference_sheets / "reference_sheet.png"
+
+    if use_ref:
+        for c in chunks:
+            if not sheet_for(c).exists():
+                log.error("No reference image for %s. Run "
+                          "scripts/make_reference_pack.py (or prepare_references.py)",
+                          c["chunk_id"])
+                return 1
+        kinds = {("pack" if "reference_packs" in str(sheet_for(c)) else "global")
+                 for c in chunks}
+        log.info("Reference conditioning: %s", ", ".join(sorted(kinds)))
+
+    def gen_key(c: dict) -> str:
+        """Everything that determines this chunk's generated pixels."""
+        shot = next((s for s in man["shots"] if s["shot_id"] == c["shot_id"]), {})
+        roi_meta = (shot or {}).get("roi") or {}
+        occ = (shot or {}).get("occluders") or {}
+        bg = ((c.get("background") or {}).get(args.background) or {}) \
+            if args.background else {}
+        return generation_key({
+            "reference_pack": file_digest(sheet_for(c)) if use_ref else None,
+            "mask": file_digest(P.root / c["mask_path"]) if use_mask else None,
+            "occluders": file_digest(P.root / occ["path"]) if occ.get("path") else None,
+            "control_profile": cfg["control"]["profile"],
+            "control": file_digest(P.root / c["depth_path"]),
+            "roi": (roi_meta.get("key") if args.roi else None),
+            "roi_used": bool(args.roi),
+            "prompt": c["prompt"], "negative": c["negative_prompt"],
+            "seed": args.seed if args.seed is not None else c["seed"],
+            "steps": args.steps or cfg["sampling"]["steps"],
+            "cfg": cfg["sampling"]["cfg"], "sampler": cfg["sampling"]["sampler"],
+            "scheduler": cfg["sampling"]["scheduler"],
+            "denoise": cfg["sampling"]["denoise"],
+            "vace_strength": cfg["sampling"]["vace_strength"],
+            "model": cfg["model"], "workflow": wf_name,
+            "width": c["width"], "height": c["height"], "length": c["n_frames"],
+            "garment": cfg.get("composite", {}),
+            "background_profile": args.background,
+            "background_plate": bg.get("config_hash"),
+        })
+
+    if not args.redo:
+        # "skipped" means a shot with no subject in it: there is nothing to
+        # regenerate, and assembly passes the original frames through.
+        # A chunk only counts as done if its recorded key still matches: if the
+        # reference pack, a mask, a control or any setting changed, the stored
+        # output is stale and must not be reused.
+        keep = []
+        for c in chunks:
+            st = run_status(c, variant)
+            if st == "skipped":
+                continue
+            if st == "done":
+                prev = (c.get("runs", {}).get(variant) or {}).get("generation_key")
+                if prev == gen_key(c):
+                    continue
+                log.info("%s: conditioning changed since it was generated "
+                         "(key %s -> %s); regenerating.", c["chunk_id"],
+                         prev, gen_key(c))
+            keep.append(c)
+        chunks = keep
+    if args.limit:
+        chunks = chunks[:args.limit]
+    if not chunks:
+        log.info("Nothing to do: every selected chunk is already generated with "
+                 "this exact conditioning (variant %r). Pass --redo to force.",
+                 variant)
+        return 0
+    log.info("Chunks to process: %d", len(chunks))
 
     # ---- pre-flight ----------------------------------------------------------
     # Check every selected chunk has its control streams BEFORE generating
@@ -255,11 +329,39 @@ def main() -> int:
                  c["start_frame"], c["end_frame"], c["n_frames"], c["width"], c["height"])
 
         try:
-            src_chunk = ensure_source_chunk(man, c, log)
-            depth = (P.root / c["depth_path"])
+            if args.roi:
+                shot = next(s for s in man["shots"] if s["shot_id"] == c["shot_id"])
+                roi_meta = (shot.get("roi") or {})
+                if roi_meta.get("rejected") or not roi_meta.get("path"):
+                    raise RuntimeError(
+                        f"{c['shot_id']}: no usable ROI (the context test "
+                        f"rejected it, or make_roi.py has not run). Full-frame "
+                        f"generation is the correct fallback.")
+                # The ROI streams cover the whole SHOT. Only use them directly
+                # when this chunk is the shot, which is the case once a short
+                # clip is padded to a single inference; anything else would need
+                # a per-chunk re-warp and is refused rather than mis-aligned.
+                if not (int(c["start_frame"]) == int(shot["start_frame"])
+                        and int(c["end_frame"]) == int(shot["end_frame"])):
+                    raise RuntimeError(
+                        f"{c['chunk_id']} does not cover its whole shot; "
+                        f"per-chunk ROI warping is not implemented.")
+                rd = P.intermediate / "roi"
+                src_chunk = rd / f"{c['shot_id']}_source_roi.mkv"
+                depth = rd / f"{c['shot_id']}_depth_roi.mkv"
+                mask_override = rd / f"{c['shot_id']}_mask_roi.mkv"
+                for nm, pth in (("source", src_chunk), ("depth", depth),
+                                ("mask", mask_override)):
+                    if not pth.exists():
+                        raise FileNotFoundError(f"ROI {nm} missing: {pth}")
+            else:
+                src_chunk = ensure_source_chunk(man, c, log)
+                depth = (P.root / c["depth_path"])
+                mask_override = None
             if not depth.exists():
                 raise FileNotFoundError(f"depth missing: {depth}. Run make_depth.py")
-            mask = (P.root / c["mask_path"]) if use_mask else None
+            mask = (mask_override if (args.roi and use_mask)
+                    else ((P.root / c["mask_path"]) if use_mask else None))
             if use_mask and not mask.exists():
                 raise FileNotFoundError(f"mask missing: {mask}. Run track_subject.py")
 
@@ -305,7 +407,7 @@ def main() -> int:
                 run(["ffmpeg", "-y", "-v", "error", "-i", str(bg_path), *LOSSLESS,
                      str(bg_mp4)], log)
             if use_ref:
-                stage(ref_sheet, "reference_sheet.png")
+                stage(sheet_for(c), "reference_sheet.png")
 
             # ---- patch the workflow -------------------------------------------
             wf = load_api_workflow(wf_path)
@@ -352,6 +454,8 @@ def main() -> int:
                        peak_vram_mb=hist.get("_peak_vram_mb", 0),
                        workflow=wf_name, use_mask=use_mask, use_reference=use_ref,
                        background_profile=args.background,
+                       reference_image=rel(sheet_for(c)),
+                       generation_key=gen_key(c),
                        seed=args.seed if args.seed is not None else c["seed"],
                        output_path=rel(dest))
             save_manifest(man)

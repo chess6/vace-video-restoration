@@ -37,8 +37,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
-    P, human_size, load_config, load_manifest, probe_dims_fps, probe_frames, rel,
-    run, setup_logging,
+    P, human_size, load_config, load_manifest, pilot_chunks, pilot_interval,
+    probe_dims_fps, probe_frames, rel, run, setup_logging, slice_frames,
 )
 
 # variant -> (vace tag or None, background profile or None, path, description)
@@ -77,8 +77,40 @@ def vace_output(c: dict, tag: str) -> Path | None:
 
 
 def plate_path(c: dict, profile: str) -> Path | None:
-    bg = c.get("background", {}).get(profile)
+    bg = (c.get("background") or {}).get(profile)
     return (P.root / bg["path"]) if bg else None
+
+
+def assemble_interval(chunks: list[dict], sources: list[Path], a: int, b: int,
+                      fps: int, work: Path, dst: Path, log) -> Path:
+    """Stitch per-chunk videos onto the timeline and cut exactly [a, b).
+
+    A pilot interval can span several chunks, and the last window of a shot is
+    snapped backwards so two of them may overlap by nearly their whole length.
+    Reuses the assembler's planner rather than reimplementing that arithmetic.
+    """
+    from assemble import stitch_shot
+    if len(chunks) == 1 and int(chunks[0]["start_frame"]) == a and \
+            int(chunks[0]["end_frame"]) == b:
+        run(["ffmpeg", "-y", "-v", "error", "-i", str(sources[0]),
+             "-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuv420p", "-an",
+             str(dst)], log)
+        return dst
+
+    # stitch_shot reads output_path off each chunk, so point it at this variant's
+    # files without disturbing the manifest.
+    shim = [{**c, "output_path": str(p)} for c, p in zip(chunks, sources)]
+    stitched = dst.with_name(dst.stem + "_stitched.mkv")
+    span_start, n = stitch_shot(shim, fps, stitched, log, work=work)
+    lo, hi = a - span_start, b - span_start
+    if lo < 0 or hi > n:
+        raise RuntimeError(f"interval {a}-{b} outside assembled span "
+                           f"{span_start}-{span_start + n}")
+    run(["ffmpeg", "-y", "-v", "error", "-i", str(stitched), "-vf",
+         f"trim=start_frame={lo}:end_frame={hi},setpts=PTS-STARTPTS",
+         "-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuv420p", "-an", str(dst)], log)
+    stitched.unlink(missing_ok=True)
+    return dst
 
 
 def main() -> int:
@@ -97,59 +129,87 @@ def main() -> int:
     if not pilot:
         log.error("No pilot recorded. Run scripts/extract_pilot.py first.")
         return 1
-    cid = pilot["chunks"][0]
-    c = next(x for x in man["chunks"] if x["chunk_id"] == cid)
+    pchunks = pilot_chunks(man)
+    if not pchunks:
+        log.error("No chunk intersects the pilot interval.")
+        return 1
+    a, b = pilot_interval(man)
+    n_expect = b - a
     out_dir = P.comparisons
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    src_chunk = (P.root / c["control_path"]).with_suffix(".mp4")
-    if not src_chunk.exists():
-        log.error("Source chunk missing: %s. Run run_chunks.py (it slices it).", src_chunk)
-        return 1
-    n_expect = int(c["n_frames"])
-    w, h, fps = probe_dims_fps(src_chunk)
-    log.info("Pilot %s: %d frames at %dx%d @ %.0f fps", cid, n_expect, w, h, fps)
+    work = P.root / man["normalized"]["work_path"]
+    fps = int(man["normalized"]["fps"])
+    w, h = int(man["normalized"]["width"]), int(man["normalized"]["height"])
+    log.info("Pilot interval %d-%d (%d frames, %.4fs) at %dx%d @ %d fps across "
+             "%d chunk(s): %s", a, b, n_expect, n_expect / fps, w, h, fps,
+             len(pchunks), ", ".join(c["chunk_id"] for c in pchunks))
+    origin = {k: v for k, v in (man.get("pilot") or {}).items()
+              if k.startswith("origin")}
+    if origin:
+        log.info("Origin: %s %.3f-%.3fs%s", origin.get("origin_source"),
+                 origin.get("origin_start_sec", 0), origin.get("origin_end_sec", 0),
+                 " (exact)" if origin.get("origin_exact") else "")
 
     variants: dict[str, dict] = {}
     missing: list[str] = []
 
     for name, tag, profile, path, describes in PLAN:
         dst = out_dir / f"{name}.mkv"
-        plate = plate_path(c, profile) if profile else None
+        plate = plate_path(pchunks[0], profile) if profile else None
 
-        if tag is None and profile is None:
-            src = src_chunk                       # variant 1
-        elif tag is None:
-            src = plate                           # variants 2 and 3
-        elif path == "A":
-            src = vace_output(c, tag)             # VACE generated it directly
-        else:
-            src = None                            # variant needs compositing
+        # Resolve this variant's per-chunk sources across EVERY pilot chunk.
+        parts: list[Path] = []
+        gap = None
+        for c in pchunks:
+            if tag is None and profile is None:
+                p = (P.root / c["control_path"]).with_suffix(".mp4")
+            elif tag is None:
+                p = plate_path(c, profile)
+            elif path == "A":
+                p = vace_output(c, tag)
+            else:                                  # composited below
+                p = None
+            if path != "B":
+                if p is None or not Path(p).exists():
+                    gap = (f"{name}: {c['chunk_id']} missing "
+                           + (f"VACE output for tag {tag!r}" if tag
+                              else f"plate for {profile!r}"))
+                    break
+                parts.append(Path(p))
+        if gap:
+            missing.append(gap)
+            continue
 
         if path == "B":
-            subject = vace_output(c, tag)
-            if subject is None or not subject.exists() or plate is None or not plate.exists():
-                missing.append(f"{name}: needs VACE tag {tag!r} and plate {profile!r}")
+            for c in pchunks:
+                subject = vace_output(c, tag)
+                pl = plate_path(c, profile)
+                if subject is None or not subject.exists() or pl is None or not pl.exists():
+                    gap = f"{name}: {c['chunk_id']} needs tag {tag!r} and plate {profile!r}"
+                    break
+                part = out_dir / f"_{name}_{c['chunk_id']}.mkv"
+                r = run([str(P.venv_python), str(P.scripts / "composite_subject.py"),
+                         "--chunk", c["chunk_id"], "--subject", str(subject),
+                         "--background", str(pl), "--out", str(part)],
+                        log, check=False)
+                if r.returncode != 0:
+                    gap = f"{name}: compositing failed ({(r.stderr or '').strip()[-200:]})"
+                    break
+                parts.append(part)
+            if gap:
+                missing.append(gap)
                 continue
-            log.info("%-28s compositing subject over %s", name, profile)
-            r = run([str(P.venv_python), str(P.scripts / "composite_subject.py"),
-                     "--chunk", cid, "--subject", str(subject),
-                     "--background", str(plate), "--out", str(dst)],
-                    log, check=False)
-            if r.returncode != 0:
-                missing.append(f"{name}: compositing failed ({r.stderr.strip()[-200:]})")
-                continue
-        else:
-            if src is None or not Path(src).exists():
-                missing.append(f"{name}: missing "
-                               + (f"VACE output for tag {tag!r}" if tag
-                                  else f"plate for {profile!r}"))
-                continue
-            # Normalise every variant to the same lossless container so the
-            # metrics compare pixels, not codecs.
-            run(["ffmpeg", "-y", "-v", "error", "-i", str(src),
-                 "-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuv420p", "-an",
-                 str(dst)], log)
+            log.info("%-28s composited %d chunk(s) over %s", name, len(parts), profile)
+
+        try:
+            assemble_interval(pchunks, parts, a, b, fps, work, dst, log)
+        except Exception as e:
+            missing.append(f"{name}: assembly failed ({e})")
+            continue
+        finally:
+            for part in parts:
+                if part.name.startswith("_"):
+                    part.unlink(missing_ok=True)
 
         got = probe_frames(dst)
         gw, gh, _ = probe_dims_fps(dst)
@@ -176,8 +236,37 @@ def main() -> int:
                       "missing pieces, or pass --skip-missing.")
             return 1
 
-    spec = {"chunk": cid, "pilot": pilot,
-            "source": rel(src_chunk), "mask": c["mask_path"],
+    # One mask covering the whole interval, so the evaluator measures inside and
+    # outside the subject over the same frames as the variants. Built from the
+    # per-SHOT masks, which are continuous, rather than the per-chunk slices,
+    # which overlap.
+    interval_mask = out_dir / "_interval_mask.mkv"
+    shot_ids = sorted({c["shot_id"] for c in pchunks})
+    if len(shot_ids) == 1:
+        sm = P.masks / f"{shot_ids[0]}_mask.mkv"
+        shot = next(s for s in man["shots"] if s["shot_id"] == shot_ids[0])
+        if sm.exists():
+            lo = a - int(shot["start_frame"])
+            slice_frames(sm, interval_mask, lo, lo + n_expect, fps, log,
+                         lossless=True, gray=True)
+        else:
+            log.warning("No mask for %s; metrics will have no subject region.",
+                        shot_ids[0])
+    else:
+        log.warning("Pilot spans %d shots (%s); per-shot mask stitching is not "
+                    "implemented, so metrics will use the first shot's mask.",
+                    len(shot_ids), ", ".join(shot_ids))
+        sm = P.masks / f"{shot_ids[0]}_mask.mkv"
+        shot = next(s for s in man["shots"] if s["shot_id"] == shot_ids[0])
+        if sm.exists():
+            lo = max(0, a - int(shot["start_frame"]))
+            slice_frames(sm, interval_mask, lo, lo + n_expect, fps, log,
+                         lossless=True, gray=True)
+
+    spec = {"chunks": [c["chunk_id"] for c in pchunks], "pilot": pilot,
+            "interval": {"start_frame": a, "end_frame": b, "frames": n_expect},
+            "source": rel(out_dir / "lanczos_original.mkv"),
+            "mask": rel(interval_mask),
             "geometry": {"width": w, "height": h, "fps": fps, "frames": n_expect},
             "variants": variants, "missing": missing}
     rp = P.reports / "pilot_variants.json"

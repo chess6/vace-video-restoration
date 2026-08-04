@@ -62,6 +62,10 @@ def main() -> int:
     ap.add_argument("--start-sec", type=float, default=None,
                     help="Force the pilot to start here instead of auto-selecting")
     ap.add_argument("--clear", action="store_true", help="Unmark existing pilot chunks")
+    ap.add_argument("--whole-clip", action="store_true",
+                    help="The pilot IS the whole working stream. Use when the "
+                         "clip was already cut to an exact requested interval, "
+                         "so the pilot boundary is the cut, not a chosen window.")
     args = ap.parse_args()
 
     log = setup_logging("extract_pilot")
@@ -83,7 +87,15 @@ def main() -> int:
 
     want_frames = int(round(np.clip(args.seconds, 5.0, 10.0) * fps))
 
-    if args.start_sec is not None:
+    if args.whole_clip:
+        # real_frames, not total_frames: a short clip is tail-padded up to a legal
+        # inference length, and that padding must never appear in the output.
+        p_start = 0
+        p_end = int(man["normalized"].get("real_frames")
+                    or man["normalized"]["total_frames"])
+        log.info("--whole-clip: the pilot is the entire %d-frame working stream",
+                 p_end)
+    elif args.start_sec is not None:
         start = int(round(args.start_sec * fps))
         log.info("Using the forced start at %.2fs (frame %d)", args.start_sec, start)
         chosen = (start, start + want_frames, None)
@@ -132,7 +144,8 @@ def main() -> int:
                  s_st / fps, s_en / fps, m, t, var)
         chosen = (s_st, s_en, shot_id)
 
-    p_start, p_end, _ = chosen
+    if not args.whole_clip:
+        p_start, p_end, _ = chosen
 
     # ---- mark the covering chunks -------------------------------------------
     marked = []
@@ -148,7 +161,26 @@ def main() -> int:
         log.error("The chosen window covers no chunk. Was preprocess_source.py run?")
         return 1
 
+    provenance = {}
+    # Clips are sampled once and shared by every run, so they live in the
+    # project-level intermediate tree, not the run-namespaced one.
+    clips_json = P.root / "intermediate" / "clips" / "clips.json"
+    if clips_json.exists():
+        try:
+            src_name = Path(man["source"]["path"]).name
+            for e in json.loads(clips_json.read_text()).get("clips", []):
+                if Path(e["clip"]).name == src_name:
+                    provenance = {"origin_source": e["source"],
+                                  "origin_start_sec": e["start_sec"],
+                                  "origin_end_sec": round(e["start_sec"]
+                                                          + e["duration_sec"], 6),
+                                  "origin_exact": bool(e.get("exact_interval"))}
+                    break
+        except Exception as e:                     # provenance is a nicety
+            log.warning("Could not read clip provenance (%s)", e)
+
     man["pilot"] = {
+        **provenance,
         "start_frame": int(p_start), "end_frame": int(p_end),
         "start_sec": round(p_start / fps, 3), "end_sec": round(p_end / fps, 3),
         "duration_sec": round((p_end - p_start) / fps, 3),

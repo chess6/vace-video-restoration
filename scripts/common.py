@@ -139,6 +139,61 @@ def check_geometry(man: dict, logger: logging.Logger, extra: dict | None = None,
     return key
 
 
+def file_digest(path: Path | None) -> str | None:
+    """Content hash of an input file, or None when absent."""
+    if path is None:
+        return None
+    path = Path(path)
+    if not path.exists():
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()[:16]
+
+
+def generation_key(parts: dict) -> str:
+    """One key covering EVERYTHING that determines a generated chunk.
+
+    Reference pack, subject mask, occluder mask, structural control (depth or
+    pose), ROI transform, prompt, seed, model settings, garment settings and the
+    background plate. Content-hashed where the input is a file, so editing a mask
+    or rebuilding a pack changes the key even though the path did not.
+
+    Without this, a variant whose conditioning changed still looks "done" and is
+    skipped, and the comparison silently mixes results from different setups.
+    """
+    blob = json.dumps(parts, sort_keys=True, default=str).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def pilot_interval(man: dict) -> tuple[int, int]:
+    """The pilot's [start, end) in working-stream frames.
+
+    Falls back to the whole stream when no pilot is recorded, so a caller never
+    has to special-case its absence.
+    """
+    p = man.get("pilot") or {}
+    if "start_frame" in p and "end_frame" in p:
+        return int(p["start_frame"]), int(p["end_frame"])
+    return 0, int(man["normalized"]["total_frames"])
+
+
+def pilot_chunks(man: dict) -> list[dict]:
+    """EVERY chunk overlapping the pilot interval, in timeline order.
+
+    A pilot is an interval, not a chunk. Callers used to take pilot["chunks"][0]
+    and silently evaluate a fraction of the requested window: a 5 s interval can
+    span several chunks, and with the final window snapped backwards two chunks
+    can overlap by nearly their whole length.
+    """
+    a, b = pilot_interval(man)
+    out = [c for c in man.get("chunks", [])
+           if not (int(c["end_frame"]) <= a or int(c["start_frame"]) >= b)]
+    return sorted(out, key=lambda c: (int(c["start_frame"]), int(c["end_frame"])))
+
+
 def rel(path: Path) -> str:
     """Path as stored in the manifest: relative to the PROJECT root, never the
     run root. Consumers resolve it back with `P.root / value`, so this is what
@@ -372,6 +427,14 @@ class Shot:
     subject_note: str = ""
 
 
+# Key under which each loaded manifest remembers the revision it came from. Held
+# on the object, not in a module-level table keyed by path: one process can load
+# the same manifest twice (a long stage and a quick edit), and a shared table
+# would let the second load erase the first one's record - which is precisely the
+# staleness this is meant to detect.
+_REV_FIELD = "_loaded_rev"
+
+
 def load_manifest(path: Path | None = None) -> dict:
     path = path or P.manifest
     if not path.exists():
@@ -379,17 +442,44 @@ def load_manifest(path: Path | None = None) -> dict:
             f"No chunk manifest at {path}. Run scripts/preprocess_source.py first."
         )
     with open(path) as f:
-        return json.load(f)
+        data = json.load(f)
+    data[_REV_FIELD] = int(data.get("_rev", 0))
+    return data
 
 
-def save_manifest(data: dict, path: Path | None = None) -> None:
-    """Atomic write so an interrupted run cannot corrupt the manifest."""
+def save_manifest(data: dict, path: Path | None = None, force: bool = False) -> None:
+    """Atomic write, refusing to overwrite a manifest that changed underneath us.
+
+    A stage that runs for minutes holds the manifest it loaded at the start and
+    writes the whole thing back at the end. If anything else edited the manifest
+    meanwhile, that write silently reverts the other change - which is exactly
+    how a re-chunked clip got restored to its old two-chunk layout by a
+    background restoration job that had been running since before the change.
+
+    The revision counter turns that silent revert into a loud failure. Stages
+    are resumable, so failing and re-running is cheap; losing the edit is not.
+    """
     path = path or P.manifest
     path.parent.mkdir(parents=True, exist_ok=True)
+    loaded = data.get(_REV_FIELD)
+    if not force and loaded is not None and path.exists():
+        try:
+            with open(path) as f:
+                on_disk = int(json.load(f).get("_rev", 0))
+        except Exception:
+            on_disk = loaded
+        if on_disk != loaded:
+            raise RuntimeError(
+                f"{path.name} changed on disk while this stage was running "
+                f"(loaded rev {loaded}, now rev {on_disk}). Refusing to write and "
+                f"revert someone else's edit. Re-run this stage; it is resumable.")
+    data["_rev"] = int(data.get("_rev", 0)) + 1
+    data.pop(_REV_FIELD, None)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
+    data[_REV_FIELD] = data["_rev"]
 
 
 def update_chunk(manifest: dict, chunk_id: str, **fields) -> dict:

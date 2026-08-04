@@ -178,6 +178,75 @@ def metrics(variant: np.ndarray, source: np.ndarray, masks: np.ndarray,
     return m
 
 
+def garment_metrics(path: Path, mask_path: Path, source_palette: dict,
+                    n_probe: int, log) -> dict:
+    """Did the garments keep the colour the SOURCE says they are?
+
+    Parses clothing on the variant itself and compares each garment class with
+    the palette learned from the original footage. Two separate failures are
+    distinguished, because they have different causes:
+
+      garment_deltaE      distance from the source colour. Large = the model
+                          repainted the clothes, which is the fault reported on
+                          the earlier build.
+      garment_temporal_dE spread of that colour across frames. Large = the
+                          colour crawls even if its average is right.
+
+    ~2.3 is a just-noticeable difference; 10+ is an obviously different colour.
+    """
+    import cv2
+    from PIL import Image
+    from make_reference_pack import Parser, palette, delta_e
+
+    if not source_palette:
+        return {}
+    parser = Parser(log)
+    cap, mcap = cv2.VideoCapture(str(path)), cv2.VideoCapture(str(mask_path))
+    frames, masks = [], []
+    while True:
+        ok, f = cap.read()
+        okm, m = mcap.read()
+        if not (ok and okm):
+            break
+        frames.append(f)
+        masks.append(cv2.cvtColor(m, cv2.COLOR_BGR2GRAY) > 127)
+    cap.release(); mcap.release()
+    if not frames:
+        return {}
+
+    idx = np.linspace(0, len(frames) - 1, min(n_probe, len(frames))).astype(int)
+    per_frame = []
+    for i in idx:
+        if masks[i].sum() < 64:
+            continue
+        rgb = cv2.cvtColor(frames[i], cv2.COLOR_BGR2RGB)
+        ys, xs = np.where(masks[i])
+        crop = rgb[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+        if crop.shape[0] < 32 or crop.shape[1] < 16:
+            continue
+        per_frame.append(palette(crop, parser.parse(Image.fromarray(crop))))
+    if not per_frame:
+        return {}
+
+    drift, temporal, seen = [], [], []
+    for name, ref in source_palette.items():
+        vals = [p[name]["lab"] for p in per_frame if name in p]
+        if not vals:
+            continue
+        med = [float(np.median([v[c] for v in vals])) for c in range(3)]
+        drift.append(delta_e(med, ref["lab"]))
+        temporal.append(float(np.mean([delta_e(v, med) for v in vals])))
+        seen.append(name)
+    if not drift:
+        return {"garment_classes_found": 0}
+    return {"garment_classes_found": len(seen),
+            "garment_classes": seen,
+            "garment_deltaE": round(float(np.mean(drift)), 2),
+            "garment_deltaE_worst": round(float(np.max(drift)), 2),
+            "garment_temporal_dE": round(float(np.mean(temporal)), 2),
+            "outfit_mutation": bool(np.max(drift) > 10.0)}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -185,6 +254,9 @@ def main() -> int:
                     help="JSON mapping variant name -> video path "
                          "(default: reports/pilot_variants.json)")
     ap.add_argument("--report", type=Path, default=None)
+    ap.add_argument("--no-garment", action="store_true",
+                    help="Skip clothing parsing (faster; loses colour drift)")
+    ap.add_argument("--garment-frames", type=int, default=6)
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -198,12 +270,33 @@ def main() -> int:
     variants = spec["variants"]
 
     pilot = man.get("pilot")
-    cid = pilot["chunks"][0]
-    c = next(x for x in man["chunks"] if x["chunk_id"] == cid)
+    # The interval, not one chunk: pilot_compare assembles every variant across
+    # all intersecting chunks and hands over a matching interval-wide mask.
     source = read_gray(P.root / spec["source"])
-    masks = read_gray(P.root / c["mask_path"])
-    log.info("Pilot %s: %d source frame(s), %d mask frame(s), %d variant(s)",
-             cid, len(source), len(masks), len(variants))
+    mask_path = P.root / spec["mask"]
+    masks = (read_gray(mask_path) if mask_path.exists()
+             else np.zeros_like(source, dtype=np.float32))
+    if not mask_path.exists():
+        log.warning("No interval mask at %s; subject/background metrics will be "
+                    "meaningless.", mask_path)
+    # The palette the SOURCE says this outfit is. Everything is measured against
+    # this, not against the reference photographs, which showed a different one.
+    source_palette = {}
+    pack_dir = P.intermediate / "reference_packs"
+    if pack_dir.exists():
+        packs = sorted(pack_dir.glob("*_pack.json"))
+        if packs:
+            source_palette = json.loads(packs[0].read_text()).get("source_palette", {})
+            log.info("Garment reference: %d class(es) from the source - %s",
+                     len(source_palette), ", ".join(source_palette))
+    iv = spec.get("interval", {})
+    log.info("Pilot interval %s-%s across %d chunk(s): %d source frame(s), "
+             "%d mask frame(s), %d variant(s)",
+             iv.get("start_frame"), iv.get("end_frame"),
+             len(spec.get("chunks", [])), len(source), len(masks), len(variants))
+    if len(masks) != len(source):
+        log.warning("Mask has %d frames but the interval has %d; metrics use the "
+                    "shorter.", len(masks), len(source))
 
     out = {}
     for name, entry in variants.items():
@@ -217,11 +310,20 @@ def main() -> int:
             plate = read_gray(pp) if pp.exists() else None
         v = read_gray(path)
         m = metrics(v, source, masks, plate)
+        if source_palette and not args.no_garment and mask_path.exists():
+            try:
+                m.update(garment_metrics(path, mask_path, source_palette,
+                                         args.garment_frames, log))
+            except Exception as e:
+                log.warning("%s: garment metrics unavailable (%s)", name, e)
         m["path"] = rel(path)
         m["describes"] = entry.get("describes", "")
         out[name] = m
+        gm = (f"  garmentdE={m['garment_deltaE']:.1f}"
+              f"{'/MUTATED' if m.get('outfit_mutation') else ''}"
+              if m.get("garment_deltaE") is not None else "")
         log.info("%-28s stability=%.3f (x%.2f src)  bal=%.2f  halo=%.2f  "
-                 "detail=%.2f  invent=%.3f%s", name, m["temporal_stability"],
+                 "detail=%.2f  invent=%.3f%s" + gm, name, m["temporal_stability"],
                  m["temporal_stability_vs_source"], m["sharpness_balance"],
                  m["edge_halo"], m["detail_gain"], m["hf_invention"],
                  f"  plate_drift={m['bg_drift_vs_plate']:.2f} "
