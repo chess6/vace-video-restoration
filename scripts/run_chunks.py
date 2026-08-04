@@ -44,6 +44,8 @@ BASELINE = "baseline"
 def default_tag(args) -> str:
     """Name the variant from the flags that make it one. Empty for the baseline."""
     parts = []
+    if getattr(args, "protected", False):
+        parts.append("prot")
     if getattr(args, "roi", False):
         parts.append("roi")
     if getattr(args, "background", None):
@@ -161,6 +163,12 @@ def main() -> int:
                      help="Ablation: drop the reference sheet ONLY, keeping the mask")
     var.add_argument("--no-mask", action="store_true",
                      help="Ablation: drop the subject mask ONLY, keeping the reference")
+    var.add_argument("--protected", action="store_true",
+                     help="Regenerate ONLY the protected-apparel submask "
+                          "(confidently exposed identity regions) instead of the "
+                          "whole figure. Garments, coverings and every uncertain "
+                          "pixel stay black and come from the plate. Requires "
+                          "scripts/make_protected_mask.py.")
     var.add_argument("--roi", action="store_true",
                      help="Generate on the stabilized subject crop instead of the "
                           "full frame (scripts/make_roi.py must have run)")
@@ -310,6 +318,9 @@ def main() -> int:
         if args.background:
             bg = (c.get("background") or {}).get(args.background) or {}
             files["background_plate"] = P.root / bg["path"] if bg.get("path") else None
+        if args.protected:
+            pm = ((shot or {}).get("protected_mask") or {}).get("path")
+            files["protected_mask"] = P.root / pm if pm else None
         if args.roi:
             rd = P.intermediate / "roi"
             sid = c["shot_id"]
@@ -335,6 +346,7 @@ def main() -> int:
         parts.update({
             "control_profile": cfg["control"]["profile"],
             "roi_used": bool(args.roi),
+            "protected_used": bool(args.protected),
             "roi_transform": (roi_meta.get("key") if args.roi else None),
             "prompt": c["prompt"], "negative": c["negative_prompt"],
             "seed": args.seed if args.seed is not None else c["seed"],
@@ -499,6 +511,24 @@ def main() -> int:
                 raise FileNotFoundError(f"depth missing: {depth}. Run make_depth.py")
             mask = (mask_override if (args.roi and use_mask)
                     else ((P.root / c["mask_path"]) if use_mask else None))
+            if args.protected and use_mask:
+                if args.roi:
+                    raise RuntimeError(
+                        "--protected with --roi is not implemented: the "
+                        "submask is derived at full-frame geometry and would "
+                        "need re-warping, which is not something to approximate.")
+                shot = next(s for s in man["shots"] if s["shot_id"] == c["shot_id"])
+                pm = (shot.get("protected_mask") or {}).get("path")
+                if not pm:
+                    raise RuntimeError(
+                        f"{c['shot_id']}: no protected submask. Run "
+                        f"scripts/make_protected_mask.py --pilot first.")
+                mask = P.root / pm
+                log.info("Regenerating the PROTECTED submask only: %.2f%% of the "
+                         "figure; the remaining %.2f%% (garment, covering, every "
+                         "uncertain pixel) comes from the plate.",
+                         100 * (shot["protected_mask"]["regenerable_fraction"]),
+                         100 * (shot["protected_mask"]["protected_fraction"]))
             if use_mask and not mask.exists():
                 raise FileNotFoundError(f"mask missing: {mask}. Run track_subject.py")
 

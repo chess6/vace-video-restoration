@@ -45,6 +45,11 @@ reference photographs - they show a different outfit, so agreeing with them
 would be the failure, not the goal. The brief pulls in two directions and the
 metrics are kept apart accordingly:
 
+Read them in that order: garment CLASS and coverage first, then boundaries,
+then accessories, and colour only if `colour_is_meaningful` - once the
+silhouette has moved, a colour offset is not the defect, and chroma correction
+would only match a missing garment to the palette of the one it replaced.
+
   garment_deltaE         area-weighted colour distance from the source, measured
                          on the SAME frame over regions the source's own parse
                          defines, so both are read from identical pixels. The
@@ -494,6 +499,14 @@ def garment_structure(var_path: Path, src_path: Path, mask_path: Path,
     # cannot quietly average them into "fine".
     out["structure_preserved"] = bool(out["garment_iou"] > 0.75
                                       and out["garment_lowfreq_drift"] < 8.0)
+    # Colour is the LAST question, and only a meaningful one while the garment
+    # is still there. Once the silhouette has moved this far, a colour offset is
+    # not the defect and correcting it would only make a missing garment better
+    # matched to the palette of the one it replaced.
+    out["colour_is_meaningful"] = bool(out["garment_iou"] > 0.60
+                                       and out["garment_lowfreq_drift"] < 12.0)
+    out["chroma_correction_advised"] = bool(
+        out["colour_is_meaningful"] and (out.get("garment_deltaE") or 0) > 2.3)
     # Deliberately NOT called "texture_restored". All this measures is that
     # high-frequency energy went up, and ringing, added noise and a hallucinated
     # weave all raise it just as reliably as genuine restored fabric does.
@@ -533,6 +546,56 @@ def reference_identity(log):
     log.info("Identity target: %d consensus-verified reference face(s) of %d",
              len(embs), info.get("candidates", 0))
     return models, (np.stack(embs) if embs else None)
+
+
+def covering_metrics(var_path: Path, src_path: Path, mask_path: Path,
+                     n_probe: int, log) -> dict:
+    """Did the pass remove a face covering, or invent an uncovered face?
+
+    A covering is apparel. Taking it off is not an improvement that scored badly
+    on some axis - it is the model dressing the person differently, and no
+    colour or sharpness metric notices it at all. So it is asked directly:
+    compare the head region's covering and skin composition against the source.
+    """
+    import cv2
+    from PIL import Image
+    from make_reference_pack import COVERING, HEAD, LBL, Parser
+
+    pairs = _probe_pairs(var_path, src_path, mask_path, n_probe)
+    if not pairs:
+        return {}
+    parser = Parser(log)
+    ids = {n: i for i, n in LBL.items()}
+    cov_ids = [ids[n] for n in COVERING]
+    head_ids = [ids[n] for n in HEAD]
+    face_id = ids["face"]
+
+    s_cov, v_cov, s_face, v_face = [], [], [], []
+    for _, s_rgb, v_rgb in pairs:
+        ls = parser.parse(Image.fromarray(s_rgb))
+        lv = parser.parse(Image.fromarray(v_rgb))
+        hs, hv = np.isin(ls, head_ids), np.isin(lv, head_ids)
+        if not hs.any():
+            continue
+        s_cov.append(float(np.isin(ls, cov_ids).sum()) / max(1, int(hs.sum())))
+        v_cov.append(float(np.isin(lv, cov_ids).sum()) / max(1, int(hv.sum()) or 1))
+        s_face.append(float((ls == face_id).sum()) / max(1, int(hs.sum())))
+        v_face.append(float((lv == face_id).sum()) / max(1, int(hv.sum()) or 1))
+    if not s_cov:
+        return {}
+    sc, vc = float(np.median(s_cov)), float(np.median(v_cov))
+    sf, vf = float(np.median(s_face)), float(np.median(v_face))
+    covered = sc > sf or sf < 0.15
+    # Removed: the source's head was substantially covered and the variant's is
+    # not, with bare face appearing where there was none.
+    removed = bool(covered and vc < 0.5 * sc and vf > sf + 0.10)
+    return {"source_head_covering_fraction": round(sc, 4),
+            "variant_head_covering_fraction": round(vc, 4),
+            "source_head_face_fraction": round(sf, 4),
+            "variant_head_face_fraction": round(vf, 4),
+            "source_face_covered": bool(covered),
+            "covering_removed": removed,
+            "covering_retention": round(vc / sc, 3) if sc > 1e-6 else None}
 
 
 def identity_metrics(path: Path, mask_path: Path, models, bank, n_probe: int,
@@ -671,10 +734,29 @@ def main() -> int:
             except Exception as e:
                 log.warning("%s: garment structure metrics unavailable (%s)",
                             name, e)
+        if not args.no_garment and mask_path.exists():
+            try:
+                m.update(covering_metrics(path, P.root / spec["source"], mask_path,
+                                          args.garment_frames, log))
+            except Exception as e:
+                log.warning("%s: covering metrics unavailable (%s)", name, e)
         if id_bank is not None and mask_path.exists():
             try:
-                m.update(identity_metrics(path, mask_path, id_models, id_bank,
-                                          args.garment_frames, log))
+                im_ = identity_metrics(path, mask_path, id_models, id_bank,
+                                       args.garment_frames, log)
+                # If the SOURCE face is covered, agreement with an uncovered
+                # reference photograph is not a score to maximise - a high value
+                # would mean the covering came off. It is reported as
+                # unobservable, and the covering check is what matters instead.
+                if m.get("source_face_covered"):
+                    im_ = {"identity_similarity_unobservable": True,
+                           "identity_note": "the source face is covered; "
+                                            "external-reference agreement cannot "
+                                            "be observed and must not be "
+                                            "maximised - see covering_removed",
+                           "identity_similarity_if_measured":
+                               im_.get("identity_similarity")}
+                m.update(im_)
             except Exception as e:
                 log.warning("%s: identity metrics unavailable (%s)", name, e)
         m["path"] = rel(path)
@@ -690,6 +772,18 @@ def main() -> int:
                  f"  plate_drift={m['bg_drift_vs_plate']:.2f} "
                  f"within2={m['bg_preserved_within_2']:.3f}"
                  if m.get("bg_drift_vs_plate") is not None else "")
+        if m.get("covering_removed"):
+            log.warning("%-28s FACE COVERING REMOVED: the source head is %.0f%% "
+                        "covering and this variant is %.0f%%, with bare face "
+                        "rising %.0f%%->%.0f%%. The model undressed the subject.",
+                        "", 100 * m["source_head_covering_fraction"],
+                        100 * m["variant_head_covering_fraction"],
+                        100 * m["source_head_face_fraction"],
+                        100 * m["variant_head_face_fraction"])
+        elif m.get("source_face_covered"):
+            log.info("%-28s covering retained (%.2f of the source's); identity "
+                     "agreement is UNOBSERVABLE here and is not scored", "",
+                     m.get("covering_retention") or 0.0)
         if m.get("identity_similarity") is not None:
             log.info("%-28s identity: agreement with the external references "
                      "%.3f (worst %.3f) on %d/%d probed frame(s)", "",
@@ -710,7 +804,10 @@ def main() -> int:
                      "HF UP" if m["high_frequency_increased"] else "HF DOWN",
                      ("  accessories invented: "
                       + ", ".join(m["accessories_invented"])
-                      if m.get("accessories_invented") else ""))
+                      if m.get("accessories_invented") else "")
+                     + ("" if m.get("colour_is_meaningful", True) else
+                        "  [colour not meaningful: the garment structure has "
+                        "gone, so dE and chroma correction say nothing]"))
 
     rp = args.report or (P.reports / "pilot_metrics.json")
     rp.parent.mkdir(parents=True, exist_ok=True)

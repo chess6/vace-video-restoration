@@ -38,6 +38,9 @@ def main() -> int:
     ap.add_argument("--frames", type=int, default=4,
                     help="How many frames across the shot to show")
     ap.add_argument("--max-candidates", type=int, default=6)
+    ap.add_argument("--detect-threshold", type=float, default=None,
+                    help="Lower it to surface people the default "
+                         "threshold misses (degraded sources score low)")
     ap.add_argument("--scale", type=float, default=1.5,
                     help="Enlarge the sheet; the source is low resolution")
     ap.add_argument("--verbose", action="store_true")
@@ -67,7 +70,9 @@ def main() -> int:
         if not ok:
             continue
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        boxes = models.detect_people(Image.fromarray(rgb))[:args.max_candidates]
+        kw = ({} if args.detect_threshold is None
+              else {"threshold": args.detect_threshold})
+        boxes = models.detect_people(Image.fromarray(rgb), **kw)[:args.max_candidates]
         canvas = frame.copy()
         for bx in boxes:
             x0, y0, x1, y1 = (int(v) for v in bx[:4])

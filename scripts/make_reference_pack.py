@@ -87,13 +87,20 @@ HEAD = {"hair", "face", "hat", "sunglasses", "scarf"}
 COVERING = {"hat", "sunglasses", "scarf"}
 
 
-def identity_regions(labels: np.ndarray) -> np.ndarray:
-    """Boolean mask of the pixels of an external photo that may be shown."""
-    ids = [i for i, n in LBL.items() if n in IDENTITY_ONLY]
+def identity_regions(labels: np.ndarray, allowed: set | None = None) -> np.ndarray:
+    """Boolean mask of the pixels of an external photo that may be shown.
+
+    `allowed` narrows IDENTITY_ONLY further for one shot. It is how a covered
+    source face is protected: with "face" removed, an external photograph of an
+    uncovered face contributes hair and nothing else, so it cannot instruct the
+    model to take the covering off.
+    """
+    names = IDENTITY_ONLY if allowed is None else (set(allowed) & IDENTITY_ONLY)
+    ids = [i for i, n in LBL.items() if n in names]
     return np.isin(labels, ids)
 
 
-def mask_to_identity(im, labels, feather: int = 3):
+def mask_to_identity(im, labels, feather: int = 3, allowed: set | None = None):
     """Blank everything that is not identity in an external reference.
 
     Garments, accessories and background are removed rather than dimmed: a faint
@@ -103,7 +110,7 @@ def mask_to_identity(im, labels, feather: int = 3):
     """
     from PIL import Image
     arr = np.asarray(im).astype(np.float32)
-    m = identity_regions(labels).astype(np.float32)
+    m = identity_regions(labels, allowed).astype(np.float32)
     if feather > 0:
         import cv2
         r = feather * 2 + 1
@@ -114,7 +121,8 @@ def mask_to_identity(im, labels, feather: int = 3):
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), float(m.mean())
 
 
-def build_panel_images(face_panel: dict, source_crop, alt_panel: dict | None):
+def build_panel_images(face_panel: dict, source_crop, alt_panel: dict | None,
+                       allowed: set | None = None):
     """The panel images, in sheet order, with the authority split enforced here.
 
     Externals in, identity-only out; the source crop passes through untouched.
@@ -126,12 +134,12 @@ def build_panel_images(face_panel: dict, source_crop, alt_panel: dict | None):
     """
     from PIL import Image
     face_img, face_keep = mask_to_identity(face_panel["image"],
-                                           face_panel["labels"])
+                                           face_panel["labels"], allowed=allowed)
     imgs = [face_img, Image.fromarray(np.asarray(source_crop))]
     keeps: list[float | None] = [face_keep, None]
     if alt_panel is not None:
         alt_img, alt_keep = mask_to_identity(alt_panel["image"],
-                                             alt_panel["labels"])
+                                             alt_panel["labels"], allowed=allowed)
         imgs.append(alt_img)
         keeps.append(alt_keep)
     return imgs, keeps
@@ -555,7 +563,22 @@ def main() -> int:
         log.error("No reference images in %s", P.references)
         return 1
 
-    groups = cluster_references(refs, parser, models, log, args.outfit_deltae)
+    # Who the target is comes from the shared resolver, so tracking, this pack
+    # and evaluation cannot disagree about it. It also drops images that contain
+    # a second person who cannot be told apart from the target - the failure that
+    # put a stranger through a full generation.
+    from identity import load_exclusions, resolve_targets
+    targets = resolve_targets(refs, models, log, load_exclusions(log))
+    if not targets["per_image"]:
+        log.error("No reference image yields a verified target face. Refusing to "
+                  "build a pack: conditioning on an unverified face is how the "
+                  "wrong person gets drawn.")
+        return 1
+    usable = [Path(v["file"]) for v in targets["per_image"].values()]
+    if len(usable) != len(refs):
+        log.info("Pack will use %d of %d reference image(s); the rest are "
+                 "excluded, unverified or ambiguous.", len(usable), len(refs))
+    groups = cluster_references(usable, parser, models, log, args.outfit_deltae)
 
     chunks = pilot_chunks(man) if args.pilot else man["chunks"]
     shot_ids = sorted({c["shot_id"] for c in chunks})
@@ -584,7 +607,19 @@ def main() -> int:
         # missing viewpoints were a real weakness of these references. Clusters
         # are still computed and recorded, as a diagnostic.
         items = [m for g in groups for m in g["members"]]
-        consensus = consensus_identity(items)
+        # Verified identity comes from the shared resolver above, not from a
+        # second opinion computed here.
+        for m in items:
+            rec = targets["per_image"].get(m["file"].name)
+            m["agreement"] = (rec or {}).get("agreement", 0.0)
+            m["identity_group"] = "consensus" if rec else None
+            m["duplicate_of"] = None
+            m["other_people"] = (rec or {}).get("other_people", 0)
+        consensus = {"members": len(targets["per_image"]),
+                     "candidates": targets["instances"],
+                     "images": targets["images"],
+                     "rejected": len(targets["rejected"]),
+                     "source": "identity.resolve_targets"}
         score_identity(items)
         log.info("Identity consensus: %d of %d reference(s) with a face agree "
                  "(%d near-duplicate(s) collapsed first, so repeated copies "
@@ -688,6 +723,14 @@ def main() -> int:
             },
             "identity_selection": panel_face["identity"],
             "identity_consensus": consensus,
+            "external_conditioning": {
+                "regions": sorted(allowed),
+                "face_allowed": bool(face_ok),
+                "source_face_covered": bool(prot.get("source_face_covered", True)),
+                "note": "arms and legs are never conditioned externally: how "
+                        "much limb is visible is sleeve and hemline coverage, "
+                        "which belongs to the source",
+            },
             "source_palette": outfit["palette"],
             "panels": [
                 {"role": "identity_face_only", "provenance": panel_face["file"].name,
@@ -722,7 +765,8 @@ def main() -> int:
         # clothing is from another day; leaving it visible invites the model to
         # reproduce it, which is the fault being corrected. The SOURCE panel is
         # left whole - it is the only correct record of the current garment.
-        imgs, keeps = build_panel_images(panel_face, outfit["best"]["crop"], alt)
+        imgs, keeps = build_panel_images(panel_face, outfit["best"]["crop"],
+                                         alt, allowed=allowed)
         for i, k in enumerate(keeps):
             if k is None:
                 continue

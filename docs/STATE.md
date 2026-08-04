@@ -33,6 +33,32 @@ Stage order, and who owns what:
 4. **Compositing** layers: restored plate, then generated figure, then preserved
    foreground occluders from the original.
 
+## Who the target is
+
+Reference photographs can contain more than one person. Identity is resolved by
+`scripts/identity.py` and **nothing else may decide it**:
+
+- Detect **every** face and person box per image; form consensus across face
+  **instances**, not one largest face per image.
+- The dominant identity is the one supported by the most **distinct images**.
+- Tie the target face to the person box containing it — that is what a tracker
+  seeds from.
+- **Reject** an image where two faces cannot be told apart. Never guess.
+- Tracking, pack selection and evaluation share this one bank.
+
+**Never use clothing-sensitive or whole-image embeddings for target identity.**
+A CLIP crop embedding responds to clothing, background and framing, and because
+the face term is down-weighted when the face is small, it *dominated* at low
+resolution — two photographs of another person were enough to carry the
+selection. A candidate with no resolvable face scores **zero** and the shot is
+flagged; when the face cannot be seen is exactly when clothing similarity is
+least able to tell two people apart.
+
+Generation refuses to start unless `subject_status` is settled **and** a human
+has approved the track. Approval is bound to the mask's content hash, so
+re-tracking invalidates it. Run-specific exclusions live in an untracked
+`intermediate/reference_exclusions.txt`.
+
 ## Authority split — the rule that keeps being violated
 
 External reference photographs show a **different outfit**. They may condition
@@ -51,8 +77,16 @@ Consequences that are easy to get wrong:
 - Garment colour distance to the externals is a **diagnostic**, never a switch,
   and never a selection criterion.
 - Which photographs become panels is decided by **identity evidence alone**:
-  consensus face agreement after near-duplicate removal, face pixel resolution,
-  and head yaw from face landmarks for the alternate view.
+  consensus agreement, face pixel resolution, and head yaw from landmarks.
+- `IDENTITY_ONLY` is **head only** (`hair`, `face`). Arms and legs are apparel:
+  how much limb is visible is sleeve and hemline coverage. A reference with bare
+  arms instructs the model to remove the source's sleeves.
+- If the **source face is covered**, external face conditioning is disabled —
+  only hair is used. Fail closed: with no covering analysis available, assume
+  covered.
+- The **protected-apparel submask** is what VACE regenerates: confidently
+  exposed head regions only, eroded from every garment boundary, required to
+  persist across frames. Everything else is black and comes from the plate.
 - Appearance clustering still runs, but no longer confines the choice. Its job
   was to stop two outfits being combined in one image; with clothing segmented
   out of every external panel there is no outfit left to conflict, so restricting
@@ -148,9 +182,12 @@ Past mistakes worth not repeating — each cost a wrong conclusion:
 
 Tracked in the task list; kept here only as orientation.
 
-- Clothing fidelity beyond mean colour: garment class, boundaries, patterns,
-  accessories. Chroma correction only if measurable drift remains, with the
-  uncorrected output kept as a separate comparison.
+- Read garment metrics in order: class and coverage, boundaries, accessories,
+  then colour — and only if `colour_is_meaningful`. Once the silhouette has
+  moved, chroma correction just matches a missing garment to the palette of the
+  one that replaced it.
+- If the source face is covered, reference identity agreement is **unobservable**,
+  not a score to maximise. `covering_removed` is the metric that matters.
 - Whole-body pose control: generate a pose-controlled variant and compare it
   against the depth-controlled one under identical references, background,
   prompt and seed.
