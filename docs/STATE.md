@@ -1,19 +1,14 @@
 # Project state
 
-Durable context for this repository: the things that are expensive to
-rediscover, and the standing instructions that outlive any one session.
-
-**Read this before starting work.** See CLAUDE.md rule 0.
+Durable context: what is expensive to rediscover, and the standing instructions
+that outlive a session. **Read before starting work** (CLAUDE.md rule 0).
 
 **Size limit: 200 lines / 12 KB**, enforced by `scripts/check_repo_clean.sh`.
-It is a working memory, not a changelog. When it is full, delete the oldest
-resolved entries — git history already has them. Anything that is now enforced
-by a test or a guard script belongs in that test, not here.
+A working memory, not a changelog: when full, delete the oldest resolved
+entries. Anything a test or guard now enforces belongs there, not here.
 
-**Rule 2a applies to this file.** It is tracked, so it must never name an input
-file, a person, an interval, a duration or a resolution of the user's media.
-Concrete values live in the untracked run manifest. Refer to things by role
-("the pilot interval", "the chosen reference cluster"), never by name.
+**Rule 2a applies here.** Tracked, so never name an input file, a person, or an
+interval/duration/resolution of the user's media. Refer to things by role.
 
 ---
 
@@ -24,14 +19,13 @@ SeedVR2, driven through a pinned ComfyUI, on a 12 GB RTX 3060.
 
 Stage order, and who owns what:
 
-1. **SeedVR2** restores the **full frame** — the background plate. Reduced
-   precision, VAE tiling, temporal batching to fit VRAM. Cached by interval and
-   config hash.
-2. **Controls** (depth, pose, masks) are derived from the **original** footage
-   only, never from the restored plate.
+1. **SeedVR2** restores the full frame — the plate. Reduced precision, VAE
+   tiling, temporal batching. Cached by interval + config hash.
+2. **Controls** (depth, pose, masks) come from the **original** footage only,
+   never from the plate.
 3. **VACE** regenerates the subject over that preserved plate.
-4. **Compositing** layers: restored plate, then generated figure, then preserved
-   foreground occluders from the original.
+4. **Compositing**: plate, then generated figure, then preserved foreground
+   occluders from the original.
 
 ## Who the target is
 
@@ -73,9 +67,8 @@ generate only the missing high-frequency texture.
 
 Consequences that are easy to get wrong:
 
-- `outfit_authority` is the constant `"source_frames"`. Never conditional.
-- Garment colour distance to the externals is a **diagnostic**, never a switch,
-  and never a selection criterion.
+- `outfit_authority` is the constant `"source_frames"`. Garment colour distance
+  to the externals is a **diagnostic**, never a switch or a selection criterion.
 - Which photographs become panels is decided by **identity evidence alone**:
   consensus agreement, face pixel resolution, and head yaw from landmarks.
 - `IDENTITY_ONLY` is **head only** (`hair`, `face`). Arms and legs are apparel:
@@ -108,9 +101,8 @@ bite most often:
   composited sheet.
 - VACE **centre-crops** the reference image, so build the sheet at the
   manifest's dimensions, not the config's.
-- Encode control streams into ComfyUI's input dir with `-qp 0`. Lossy
-  re-encoding rounds mask edges outward and regenerates pixels outside the
-  tracked boundary.
+- Encode control streams into ComfyUI's input dir with `-qp 0`; lossy re-encoding
+  rounds mask edges outward.
 - Use `VAEEncodeTiled`. Untiled encode peaks near 12 GB and OOMs.
 - SeedVR2 is **native** to the pinned ComfyUI (`comfy_extras/nodes_seedvr.py`).
   No custom node pack. `frames_per_chunk` must be 4n+1; `temporal_overlap` is in
@@ -167,25 +159,35 @@ Past mistakes worth not repeating — each cost a wrong conclusion:
   "found the subject": retry at a lower threshold whenever no candidate has
   identity evidence, not only when nothing at all was found. Never size or score
   a subject by height alone; an unusual pose makes height the wrong axis.
-- **Container noise read as signal.** An exact-equality background metric
-  measured encoder noise and inverted the ranking. Use a tolerance.
-- **Piping a build through `head`/`tail`.** SIGPIPE killed a generator mid-write
-  and left a stale graph; `tail` masked a non-zero exit.
+- **Container noise read as signal.** An exact-equality metric measured encoder
+  noise and inverted the ranking. Use a tolerance.
+- **Piping a build through `head`/`tail`.** SIGPIPE kills a generator mid-write;
+  `tail` masks a non-zero exit.
 
 ## Standing instructions from the user
 
-- Cut short sample clips rather than processing whole videos. Nothing runs the
-  full video without explicit confirmation (rule 5).
+- Cut short sample clips; nothing runs the full video without confirmation.
 - Every time work needs the user's eyes, hand over **one zip** from
   `scripts/make_review_bundle.py` (rule 1).
 - Prepare the 14B cloud path, but **do not download 14B locally**.
 - State separate effects, separate runtimes, separate VRAM and disk figures.
   Never a single blended claim.
 
+## Cloud
+
+See `docs/CLOUD_RUNBOOK.md`. Connection quirks, the transfer allowlist, the gates
+that must pass before a generation, and teardown.
+
+The number that decides whether VACE runs at all: the **protected-regenerable
+fraction**. At 240p it is 1.57% of the tracked figure — the plate supplies the
+rest. It is resolution-dependent; re-measure at 720p.
+
 ## Open work
 
 Tracked in the task list; kept here only as orientation.
 
+- `mask.grow=4` puts 4.51% of the dilated subject mask onto another person.
+  Reduce it or rely on the occluder layer.
 - Read garment metrics in order: class and coverage, boundaries, accessories,
   then colour — and only if `colour_is_meaningful`. Once the silhouette has
   moved, chroma correction just matches a missing garment to the palette of the
