@@ -51,7 +51,8 @@ Consequences that are easy to get wrong:
 - Garment colour distance to the externals is a **diagnostic**, never a switch,
   and never a selection criterion.
 - Which photographs become panels is decided by **identity evidence alone**:
-  leave-one-out face agreement, face pixel resolution, viewing-angle difference.
+  consensus face agreement after near-duplicate removal, face pixel resolution,
+  and head yaw from face landmarks for the alternate view.
 - Appearance clustering still runs, but no longer confines the choice. Its job
   was to stop two outfits being combined in one image; with clothing segmented
   out of every external panel there is no outfit left to conflict, so restricting
@@ -85,10 +86,16 @@ bite most often:
 
 ## Provenance and staleness
 
-`generation_key` content-hashes everything that determines a chunk's pixels:
-reference pack, masks, occluders, controls, ROI transform, prompts, seed, model
-and sampler settings, background plate. A result whose key no longer matches is
-**not** a result — it must regenerate before anything is compared.
+**Two keys, not one.** `vace_key` content-hashes what reaches the sampler:
+staged reference sheet, plate, control, mask, ROI streams, prompts, seed, model
+and sampler settings. `composite_key` hashes what reaches the compositor: VACE
+output, plate, subject mask, occluder mask, band settings. They were one key,
+so widening an alpha ramp — seconds of CPU — marked a finished generation stale
+and demanded ~18 minutes of GPU to reproduce identical pixels.
+
+Hash file **contents**, never a config or geometry key: a rebuilt plate or a
+re-warped ROI stream keeps its filename and its geometry while its pixels
+change completely. A result whose key no longer matches is **not** a result.
 
 The key is captured **before** staging and re-read **after** inference. If they
 disagree, the inputs changed during the ~16-minute run and the output settles as
@@ -110,7 +117,15 @@ Past mistakes worth not repeating — each cost a wrong conclusion:
   the subject at true extent; apply dilation only *after* the set is fixed.
 - **Self-comparison as evidence.** The identity bank is built from the reference
   photographs, so scoring a photograph against it returns 1.000 for anything
-  already in it. Score leave-one-out, against the others.
+  already in it. Verify by consensus: collapse near-duplicates, then score by
+  median agreement with the rest. A single maximum lets two copies of the wrong
+  person vouch for each other.
+- **A proxy standing in for the thing itself.** Full-image CLIP distance is not
+  a viewing angle — it responds to background, framing and clothing. Head
+  orientation comes from face landmarks. Proximity is not occlusion — a person
+  beside the subject occludes nothing; verify depth order. A rise in
+  high-frequency energy is not restored texture — ringing and noise raise it
+  too. Name the measurement after what it measures.
 - **Container noise read as signal.** An exact-equality background metric
   measured encoder noise and inverted the ranking. Use a tolerance.
 - **Piping a build through `head`/`tail`.** SIGPIPE killed a generator mid-write
@@ -139,7 +154,5 @@ Tracked in the task list; kept here only as orientation.
 - Whole-body pose control: generate a pose-controlled variant and compare it
   against the depth-controlled one under identical references, background,
   prompt and seed.
-- Compositing layer 3 should take **plate** pixels by default, with an opaque
-  core and a narrow, one-sided, temporally stable boundary — not a hard edge.
 - Multi-chunk assembly is exercised on a synthetic longer interval, separately
   from the pilot, which is padded to a single inference.

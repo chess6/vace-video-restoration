@@ -86,16 +86,20 @@ def record_run(c: dict, variant: str, **fields) -> None:
 def needs_run(c: dict, variant: str, key: str) -> bool:
     """Does this chunk still have to be generated for this variant?
 
-    Only a `done` record whose stored key still matches the conditioning on disk
-    counts as current. Anything else - pending, failed, or `stale` (see
+    Only a `done` record whose stored VACE key still matches the sampler inputs
+    on disk counts as current. Anything else - pending, failed, or `stale` (see
     `settled_status`) - has to run again. `skipped` means the shot has no subject
     in it, so there is nothing to generate and assembly passes it through.
+
+    The key compared here covers generation inputs ONLY. Compositing settings
+    have their own key downstream, so widening an alpha ramp no longer looks
+    like a reason to spend another ~18 minutes on the GPU.
     """
     st = run_status(c, variant)
     if st == "skipped":
         return False
     if st == "done":
-        return (c.get("runs", {}).get(variant) or {}).get("generation_key") != key
+        return (c.get("runs", {}).get(variant) or {}).get("vace_key") != key
     return True
 
 
@@ -255,21 +259,48 @@ def main() -> int:
                  for c in chunks}
         log.info("Reference conditioning: %s", ", ".join(sorted(kinds)))
 
-    def gen_key(c: dict) -> str:
-        """Everything that determines this chunk's generated pixels."""
+    def vace_input_files(c: dict) -> dict:
+        """Every FILE whose bytes reach the sampler for this chunk.
+
+        Hashed by content, not by path or by the config that produced them: a
+        rebuilt plate or a re-warped ROI stream keeps its filename and its
+        geometry key while its pixels change completely.
+        """
+        shot = next((s for s in man["shots"] if s["shot_id"] == c["shot_id"]), {})
+        files: dict[str, Path | None] = {
+            "reference_pack": sheet_for(c) if use_ref else None,
+            "control": P.root / c["depth_path"],
+            "mask": (P.root / c["mask_path"]) if use_mask else None,
+        }
+        if args.background:
+            bg = (c.get("background") or {}).get(args.background) or {}
+            files["background_plate"] = P.root / bg["path"] if bg.get("path") else None
+        if args.roi:
+            rd = P.intermediate / "roi"
+            sid = c["shot_id"]
+            # The ROI streams are what the sampler actually sees when --roi is
+            # on; the full-frame control and mask above are not staged at all.
+            files["roi_source"] = rd / f"{sid}_source_roi.mkv"
+            files["roi_control"] = rd / f"{sid}_depth_roi.mkv"
+            files["roi_mask"] = rd / f"{sid}_mask_roi.mkv"
+        return files
+
+    def vace_key(c: dict) -> str:
+        """What determines this chunk's GENERATED pixels, and nothing else.
+
+        Split out from the old single key because compositing settings were in
+        it. Widening an alpha ramp costs seconds and touches no sampler input,
+        but it changed the key, marked a finished generation stale and demanded
+        another ~18 minutes on the GPU to produce identical pixels. Compositing
+        now has its own key (common.composite_key), computed downstream.
+        """
         shot = next((s for s in man["shots"] if s["shot_id"] == c["shot_id"]), {})
         roi_meta = (shot or {}).get("roi") or {}
-        occ = (shot or {}).get("occluders") or {}
-        bg = ((c.get("background") or {}).get(args.background) or {}) \
-            if args.background else {}
-        return generation_key({
-            "reference_pack": file_digest(sheet_for(c)) if use_ref else None,
-            "mask": file_digest(P.root / c["mask_path"]) if use_mask else None,
-            "occluders": file_digest(P.root / occ["path"]) if occ.get("path") else None,
+        parts = {name: file_digest(p) for name, p in vace_input_files(c).items()}
+        parts.update({
             "control_profile": cfg["control"]["profile"],
-            "control": file_digest(P.root / c["depth_path"]),
-            "roi": (roi_meta.get("key") if args.roi else None),
             "roi_used": bool(args.roi),
+            "roi_transform": (roi_meta.get("key") if args.roi else None),
             "prompt": c["prompt"], "negative": c["negative_prompt"],
             "seed": args.seed if args.seed is not None else c["seed"],
             "steps": args.steps or cfg["sampling"]["steps"],
@@ -279,25 +310,69 @@ def main() -> int:
             "vace_strength": cfg["sampling"]["vace_strength"],
             "model": cfg["model"], "workflow": wf_name,
             "width": c["width"], "height": c["height"], "length": c["n_frames"],
-            "garment": cfg.get("composite", {}),
             "background_profile": args.background,
-            "background_plate": bg.get("config_hash"),
         })
+        return generation_key(parts)
+
+    def adopt_legacy_run(c: dict, key: str, log) -> bool:
+        """One-time migration for chunks generated before the key was split.
+
+        Their record carries the old combined key, which cannot be recomputed:
+        it included the compositing settings, and those have since changed - so
+        comparing it would report a difference that has nothing to do with the
+        sampler and would burn ~18 minutes reproducing identical pixels.
+
+        What CAN be established is the thing that actually matters: whether any
+        true generation input has been touched since the output was written.
+        Every input file's mtime is compared against the output's. If all of them
+        predate it, the file on disk is still the product of these inputs and the
+        new key is stamped on it; otherwise nothing is adopted and it regenerates.
+
+        Stated plainly because it is weaker than a content hash: mtimes survive
+        a copy, so this trusts the filesystem. It applies only to records written
+        before the split, and only once.
+        """
+        rec = (c.get("runs", {}).get(variant) or {})
+        if rec.get("vace_key") or not rec.get("generation_key"):
+            return False
+        outp = P.root / rec["output_path"] if rec.get("output_path") else None
+        if not outp or not outp.exists():
+            return False
+        out_mtime = outp.stat().st_mtime
+        newer = [n for n, p in vace_input_files(c).items()
+                 if p is not None and p.exists() and p.stat().st_mtime > out_mtime]
+        if newer:
+            log.info("%s: %s changed after the output was written; not adopting "
+                     "the legacy record - it regenerates.", c["chunk_id"],
+                     ", ".join(sorted(newer)))
+            return False
+        rec["vace_key"] = key
+        rec["key_adopted"] = ("split from the pre-split combined key; every "
+                              "generation input predates the output file")
+        log.info("%s: adopting the completed %s run under the new VACE key %s "
+                 "(no generation input has been touched since it was written).",
+                 c["chunk_id"], variant, key)
+        return True
 
     if not args.redo:
-        keep = []
+        keep, adopted = [], 0
         for c in chunks:
-            key = gen_key(c)
+            key = vace_key(c)
+            if run_status(c, variant) == "done" and adopt_legacy_run(c, key, log):
+                adopted += 1
+                continue
             if not needs_run(c, variant, key):
                 continue
             if run_status(c, variant) == "done":
-                prev = (c.get("runs", {}).get(variant) or {}).get("generation_key")
-                log.info("%s: conditioning changed since it was generated "
+                prev = (c.get("runs", {}).get(variant) or {}).get("vace_key")
+                log.info("%s: a generation input changed since it was produced "
                          "(key %s -> %s); regenerating.", c["chunk_id"], prev, key)
             elif run_status(c, variant) == "stale":
                 log.info("%s: previous result was recorded stale (its inputs "
                          "changed mid-run); regenerating.", c["chunk_id"])
             keep.append(c)
+        if adopted:
+            save_manifest(man)
         chunks = keep
     if args.limit:
         chunks = chunks[:args.limit]
@@ -427,7 +502,7 @@ def main() -> int:
             # onto an output generated from the old one, and it would look
             # current forever. It is re-read after the run and the two are
             # compared; see settled_status().
-            key_before = gen_key(c)
+            key_before = vace_key(c)
             src_name = stage(src_chunk, f"chunk_source_{cid}.mp4")
             dep_mp4 = P.comfy_input / f"chunk_depth_{cid}.mp4"
             run(["ffmpeg", "-y", "-v", "error", "-i", str(depth), *LOSSLESS,
@@ -484,7 +559,7 @@ def main() -> int:
             dest = P.restored_480p / f"{cid}{suffix}.mp4"
             shutil.move(str(produced), dest)
 
-            key_after = gen_key(c)
+            key_after = vace_key(c)
             status = settled_status(key_before, key_after)
             record_run(c, variant, status=status, error="",
                        duration_sec=round(dt, 2),
@@ -492,7 +567,7 @@ def main() -> int:
                        workflow=wf_name, use_mask=use_mask, use_reference=use_ref,
                        background_profile=args.background,
                        reference_image=rel(sheet_for(c)),
-                       generation_key=key_before,
+                       vace_key=key_before,
                        inputs_changed_during_run=(key_after if status == "stale"
                                                   else None),
                        seed=args.seed if args.seed is not None else c["seed"],

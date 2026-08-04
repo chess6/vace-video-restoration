@@ -37,10 +37,10 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import file_digest, generation_key  # noqa: E402
+from common import composite_key, file_digest, generation_key  # noqa: E402
 from make_reference_pack import (  # noqa: E402
-    GARMENT, IDENTITY_ONLY, LBL, build_panel_images, identity_regions,
-    mask_to_identity,
+    GARMENT, IDENTITY_ONLY, LBL, build_panel_images, consensus_identity,
+    face_yaw, identity_regions, mask_to_identity, score_identity,
 )
 from run_chunks import needs_run, settled_status  # noqa: E402
 
@@ -151,7 +151,7 @@ def test_source_panel_is_untouched(f: Failures) -> None:
 # ---------------------------------------------------------------------------
 
 def key_for(sheet: Path) -> str:
-    """The shape of run_chunks.gen_key: content hashes, not paths."""
+    """The shape of run_chunks.vace_key: content hashes, not paths."""
     return generation_key({"reference_pack": file_digest(sheet), "seed": 7})
 
 
@@ -161,7 +161,7 @@ def test_content_change_invalidates(f: Failures) -> None:
         sheet.write_bytes(b"pack-with-external-clothing")
         k_old = key_for(sheet)
 
-        chunk = {"runs": {"v": {"status": "done", "generation_key": k_old}}}
+        chunk = {"runs": {"v": {"status": "done", "vace_key": k_old}}}
         f.check(not needs_run(chunk, "v", k_old),
                 "an untouched chunk was scheduled to regenerate")
 
@@ -173,6 +173,45 @@ def test_content_change_invalidates(f: Failures) -> None:
                 "would be compared as though it matched")
         f.check(needs_run(chunk, "v", k_new),
                 "a chunk generated from the old pack still counts as done")
+
+        # A record carrying only the PRE-SPLIT combined key is not current by
+        # itself. It goes through the explicit migration in run_chunks, which
+        # checks that no generation input has been touched since; it must never
+        # pass silently here.
+        legacy = {"runs": {"v": {"status": "done", "generation_key": k_new}}}
+        f.check(needs_run(legacy, "v", k_new),
+                "a pre-split record was accepted as current without the "
+                "migration ever verifying its inputs")
+
+
+def test_composite_key_is_independent_of_generation(f: Failures) -> None:
+    """The point of splitting the keys: a cheap compositing change must not send
+    a finished 18-minute generation back to the GPU."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        for n in ("out.mp4", "plate.mkv", "mask.mkv", "occ.mkv"):
+            (d / n).write_bytes(n.encode())
+        settings = {"band_px": 3, "occluder_band_px": 2}
+        args = (d / "out.mp4", d / "plate.mkv", d / "mask.mkv", d / "occ.mkv")
+
+        k1 = composite_key(*args, settings)
+        k2 = composite_key(*args, {**settings, "occluder_band_px": 4})
+        f.check(k1 != k2, "changing a compositing setting left the composite "
+                          "key unchanged, so the composite would go stale "
+                          "without anyone noticing")
+
+        # ...and the same change must be invisible to the VACE key, which is
+        # built from sampler inputs only.
+        vk = generation_key({"reference_pack": file_digest(d / "out.mp4"),
+                             "seed": 7})
+        f.check(not needs_run({"runs": {"v": {"status": "done", "vace_key": vk}}},
+                              "v", vk),
+                "a compositing change forced a regeneration")
+
+        # Regenerating the subject MUST invalidate the composite built on it.
+        (d / "out.mp4").write_bytes(b"a different generation")
+        f.check(composite_key(*args, settings) != k1,
+                "the composite key ignored new generated pixels")
 
 
 def test_midrun_change_cannot_be_recorded_current(f: Failures) -> None:
@@ -196,11 +235,105 @@ def test_midrun_change_cannot_be_recorded_current(f: Failures) -> None:
             "a shot with no subject in it was scheduled for generation")
 
 
+# ---------------------------------------------------------------------------
+# identity: consensus, not a single maximum
+# ---------------------------------------------------------------------------
+
+def person(rng, base, jitter=0.12, size=(800, 600), frac=0.05, yaw=0.0):
+    """A synthetic reference: a face embedding near `base`, plus the metadata the
+    selector reads. Background and outfit are irrelevant here by construction -
+    which is the point, since identity must not depend on them."""
+    v = base + rng.normal(0, jitter, base.shape)
+    v = v / np.linalg.norm(v)
+    m = {"face": v.astype(np.float32), "face_frac": frac, "size": list(size),
+         "yaw": yaw, "cluster": 0}
+    m["file"] = type("F", (), {"name": f"ref{rng.integers(1 << 30)}.jpg"})()
+    return m
+
+
+def test_consensus_beats_duplicate_outliers(f: Failures) -> None:
+    """Three copies of the WRONG person, which is what defeats a maximum.
+
+    Taking the single largest similarity asks only whether SOME other photograph
+    agrees. Duplicates of an impostor agree with each other perfectly, so the
+    impostor scored 1.000 and could be drawn as the identity panel.
+    """
+    rng = np.random.default_rng(7)
+    right = np.array([1.0] + [0.0] * 15)
+    wrong = np.array([0.0, 1.0] + [0.0] * 14)
+
+    real = [person(rng, right) for _ in range(5)]
+    impostor = person(rng, wrong, jitter=0.0)
+    dupes = [impostor] + [dict(impostor, file=impostor["file"]) for _ in range(2)]
+    items = real + dupes
+
+    info = consensus_identity(items)
+    score_identity(items)
+
+    f.check(info["duplicates"] >= 2,
+            f"near-duplicates were not collapsed ({info['duplicates']} found); "
+            f"repeated copies can still vote for each other")
+    for m in real:
+        f.check(m["identity"]["verified"],
+                "a genuine reference was excluded from the consensus group")
+    for m in dupes:
+        f.check(not m["identity"]["verified"],
+                "an impostor backed only by copies of itself was verified; this "
+                "is exactly what taking the maximum similarity got wrong")
+        f.check(m["identity"]["score"] < min(r["identity"]["score"] for r in real),
+                "an impostor outscored every genuine reference")
+
+
+def test_consensus_survives_background_and_outfit_changes(f: Failures) -> None:
+    """Same person, photographed in different places wearing different things.
+
+    Identity must not weaken because the scene changed - that was the flaw in
+    reading full-image similarity as identity or as viewpoint.
+    """
+    rng = np.random.default_rng(11)
+    base = np.array([0.0, 0.0, 1.0] + [0.0] * 13)
+    items = [person(rng, base, jitter=0.20) for _ in range(6)]
+    for i, m in enumerate(items):          # wildly different scenes and clothes
+        m["clip"] = np.eye(16)[i].astype(np.float32)
+        m["clip_identity"] = (base + rng.normal(0, 0.05, 16))
+        m["clip_identity"] /= np.linalg.norm(m["clip_identity"])
+
+    consensus_identity(items)
+    score_identity(items)
+    f.check(all(m["identity"]["verified"] for m in items),
+            "changing background and outfit broke identity consensus, which "
+            "should depend on the face alone")
+
+
+def test_yaw_is_a_head_measurement(f: Failures) -> None:
+    """Landmarks, not scene similarity."""
+    f.check(face_yaw(None) is None and face_yaw([(0, 0)]) is None,
+            "missing landmarks must yield no yaw rather than a made-up one")
+
+    head_on = [(40, 50), (60, 50), (50, 62), (44, 72), (56, 72)]
+    turned = [(40, 50), (60, 50), (57, 62), (44, 72), (56, 72)]
+    other = [(40, 50), (60, 50), (43, 62), (44, 72), (56, 72)]
+    yf, yt, yo = face_yaw(head_on), face_yaw(turned), face_yaw(other)
+    f.check(abs(yf) < 0.05, f"a head-on view reported yaw {yf:+.3f}")
+    f.check(yt > 0.2 and yo < -0.2,
+            f"turned faces did not separate by sign ({yt:+.3f}, {yo:+.3f})")
+
+    # Scaling and translating the whole face must not change the yaw: it is an
+    # orientation, not a position or a size.
+    big = [(2 * x + 300, 2 * y + 100) for x, y in turned]
+    f.check(abs(face_yaw(big) - yt) < 1e-6,
+            "yaw changed when the face was moved and scaled")
+
+
 def main() -> int:
     f = Failures()
     for t in (test_class_partition, test_masking_removes_clothing,
               test_source_panel_is_untouched, test_content_change_invalidates,
-              test_midrun_change_cannot_be_recorded_current):
+              test_composite_key_is_independent_of_generation,
+              test_midrun_change_cannot_be_recorded_current,
+              test_consensus_beats_duplicate_outliers,
+              test_consensus_survives_background_and_outfit_changes,
+              test_yaw_is_a_head_measurement):
         t(f)
     skipped = [m for m in f if m.startswith("SKIPPED")]
     real = [m for m in f if not m.startswith("SKIPPED")]

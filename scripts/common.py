@@ -168,6 +168,29 @@ def generation_key(parts: dict) -> str:
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
+def composite_key(vace_output: Path, plate: Path | None, mask: Path | None,
+                  occluders: Path | None, settings: dict) -> str:
+    """What determines a COMPOSITED frame, given generation is already done.
+
+    Deliberately separate from the VACE key. Compositing is seconds of CPU work
+    over finished pixels: the generated subject, the plate it sits on, the mask
+    it is cut out with, the foreground kept above it, and the band settings.
+    None of that reaches the sampler.
+
+    They used to share one key, so widening an alpha ramp marked a finished
+    generation stale and demanded ~18 minutes of GPU time to reproduce pixels
+    that were already correct. Splitting them means a compositing change
+    re-composites and nothing else.
+    """
+    return generation_key({
+        "vace_output": file_digest(vace_output),
+        "plate": file_digest(plate),
+        "mask": file_digest(mask),
+        "occluders": file_digest(occluders),
+        "settings": settings,
+    })
+
+
 def pilot_interval(man: dict) -> tuple[int, int]:
     """The pilot's [start, end) in working-stream frames.
 

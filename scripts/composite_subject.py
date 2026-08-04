@@ -26,6 +26,7 @@ workflow's FeatherMask for in_vace, this band for composite - never both.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -33,8 +34,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
-    P, load_config, load_manifest, probe_dims_fps, probe_frames, rel,
-    setup_logging,
+    P, composite_key, load_config, load_manifest, probe_dims_fps, probe_frames,
+    rel, setup_logging,
 )
 
 
@@ -86,6 +87,31 @@ def occluder_alpha(occ_u8: np.ndarray, band_px: int) -> np.ndarray:
     d = cv2.distanceTransform(occ.astype(np.uint8), cv2.DIST_L2, 3)
     a[occ] = np.clip(1.0 - d[occ] / float(band_px), 0.0, 1.0)
     return a
+
+
+def stabilize_occluder_alpha(cur: np.ndarray, prev: np.ndarray | None,
+                             smooth: float) -> np.ndarray:
+    """Carry part of the previous frame's foreground alpha into this one, WITHOUT
+    letting it contradict the current frame.
+
+    A plain temporal blend is wrong in two ways that both show on screen. Where
+    an occluder has moved on, the old alpha trails behind it as a smear of
+    transparency over background it no longer covers. Where it has just arrived,
+    the old alpha eats into its core and the generated figure shows through a
+    solid object.
+
+    So the blend is confined to the current frame's ramp. Outside the current
+    occluder the alpha is pinned to 1, and throughout its opaque core to 0; only
+    the narrow boundary band - the part that was jittering in the first place -
+    is allowed to remember anything. Those two regions are exactly the pixels
+    where `cur` is 1.0 or 0.0 by construction, so no extra mask is needed.
+    """
+    if prev is None or smooth <= 0 or prev.shape != cur.shape:
+        return cur
+    sm = (1.0 - smooth) * cur + smooth * prev
+    pinned = (cur == 1.0) | (cur == 0.0)
+    sm[pinned] = cur[pinned]
+    return np.clip(sm, 0.0, 1.0)
 
 
 def composite(subject: Path, background: Path, mask: Path, out: Path,
@@ -142,15 +168,14 @@ def composite(subject: Path, background: Path, mask: Path, out: Path,
             if oko:
                 # Layer 3: anything in front of the subject wins, with an opaque
                 # core and a narrow one-sided boundary (see occluder_alpha).
-                oa = occluder_alpha(cv2.cvtColor(fo, cv2.COLOR_BGR2GRAY),
-                                    occ_band_px)
-                if occ_smooth > 0 and occ_prev is not None:
-                    # The occluder silhouette is re-segmented every frame and its
-                    # boundary lands a pixel or two differently each time. Carry a
-                    # little of the previous frame's alpha so the edge does not
-                    # crawl. Kept low deliberately: too much smoothing drags a
-                    # ghost of the occluder behind a fast-moving one.
-                    oa = (1.0 - occ_smooth) * oa + occ_smooth * occ_prev
+                # The occluder silhouette is re-segmented every frame and its
+                # boundary lands a pixel or two differently each time. The blend
+                # steadies that, confined to the current frame's ramp so it can
+                # neither trail behind a moving occluder nor hollow out its core.
+                oa = stabilize_occluder_alpha(
+                    occluder_alpha(cv2.cvtColor(fo, cv2.COLOR_BGR2GRAY),
+                                   occ_band_px),
+                    occ_prev, occ_smooth)
                 occ_prev = oa
                 if (oa < 1.0).any():
                     occ_frames += 1
@@ -194,6 +219,8 @@ def main() -> int:
     ap.add_argument("--occluders", type=Path, default=None,
                     help="Foreground mask kept ABOVE the generated figure. "
                          "Defaults to the shot's occluder mask when it exists.")
+    ap.add_argument("--redo", action="store_true",
+                    help="Re-composite even when the composite key still matches")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -232,11 +259,30 @@ def main() -> int:
         occ = cand if cand and cand.exists() else None
     if occ is not None:
         log.info("Foreground layer: %s kept above the generated figure", rel(occ))
-    composite(args.subject, args.background, mask, args.out, band,
-              bool(comp.get("center_band", True)), int(c["fps"]), log,
-              occluders=occ,
-              occ_band_px=int(comp.get("occluder_band_px", 2)),
-              occ_smooth=float(comp.get("occluder_temporal_smooth", 0.35)))
+    settings = {"band_px": band, "center_band": bool(comp.get("center_band", True)),
+                "occluder_band_px": int(comp.get("occluder_band_px", 2)),
+                "occluder_temporal_smooth": float(
+                    comp.get("occluder_temporal_smooth", 0.35))}
+    key = composite_key(args.subject, args.background, mask, occ, settings)
+    # Its own key, decided on its own inputs. A compositing change re-composites;
+    # it never marks the generation behind it stale.
+    side = args.out.with_suffix(args.out.suffix + ".key.json")
+    if (args.out.exists() and side.exists() and not args.redo
+            and json.loads(side.read_text()).get("composite_key") == key):
+        log.info("Composite is already current for these inputs and settings "
+                 "(key %s). Pass --redo to force.", key)
+        return 0
+
+    stats = composite(args.subject, args.background, mask, args.out, band,
+                      settings["center_band"], int(c["fps"]), log,
+                      occluders=occ, occ_band_px=settings["occluder_band_px"],
+                      occ_smooth=settings["occluder_temporal_smooth"])
+    side.write_text(json.dumps(
+        {"composite_key": key, "settings": settings, "inputs": {
+            "vace_output": rel(args.subject), "plate": rel(args.background),
+            "mask": rel(mask), "occluders": rel(occ) if occ else None},
+         **stats}, indent=2) + "\n")
+    log.info("Composite key %s -> %s", key, rel(side))
     return 0
 
 

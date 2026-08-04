@@ -18,11 +18,15 @@ Strict division of authority:
     high-frequency texture.
 
 Which photographs become panels is decided by IDENTITY EVIDENCE ALONE:
-leave-one-out face agreement across the reference set, how many pixels the face
-occupies, and - for the second panel - how different the viewing angle is. Never
-by garment colour. Garment distance is still measured and recorded, purely as
-evidence that the photographs show other clothes; it is a diagnostic, never a
-switch, and the source remains the garment authority whatever it says.
+consensus face agreement across the reference set (near-duplicates collapsed
+first, so repeated copies cannot vote twice), how many pixels the face occupies,
+and - for the second panel - how far the head is actually turned, measured from
+face landmarks. Never by garment colour, and never by full-image similarity,
+which responds to background and framing rather than to viewpoint.
+
+Garment distance is still measured and recorded, purely as evidence that the
+photographs show other clothes; it is a diagnostic, never a switch, and the
+source remains the garment authority whatever it says.
 
 Appearance clustering still runs and is still recorded, but it no longer confines
 the choice. Its job was to stop two outfits being combined in one conditioning
@@ -271,9 +275,15 @@ def cluster_references(files: list[Path], parser: Parser, models, log,
         lab = parser.parse(im)
         pal = palette(np.asarray(im), lab)
         emb = models.clip_embed([im])[0]
-        face, _, face_frac = models.face_embed(im)
+        # A SECOND embedding, of the identity-masked image. The full-frame one
+        # above is what clusters outfits; it is dominated by background, framing
+        # and clothing, so it must never be read as "a different viewing angle".
+        # This one has all of that removed and describes the person only.
+        id_emb = models.clip_embed([mask_to_identity(im, lab, feather=0)[0]])[0]
+        face, kps, face_frac = face_detail(models, im)
         items.append({"file": f, "image": im, "labels": lab, "palette": pal,
-                      "clip": emb, "face": face, "face_frac": face_frac,
+                      "clip": emb, "clip_identity": id_emb, "face": face,
+                      "yaw": face_yaw(kps), "face_frac": face_frac,
                       "size": list(im.size)})
 
     # Appearance clustering: garment palette distance first (that is what an
@@ -306,6 +316,144 @@ def cluster_references(files: list[Path], parser: Parser, models, log,
     return groups
 
 
+def face_detail(models, pil):
+    """(embedding, 5-point landmarks, face area fraction) for the largest face.
+
+    Models.face_embed returns the bounding box, which says nothing about which
+    way the head is turned. The landmarks do.
+    """
+    app = models.face()
+    if app is None:
+        return None, None, 0.0
+    import cv2
+    bgr = cv2.cvtColor(np.asarray(pil.convert("RGB")), cv2.COLOR_RGB2BGR)
+    faces = app.get(bgr)
+    if not faces:
+        return None, None, 0.0
+    f = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
+    fa = ((f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])) / (pil.width * pil.height)
+    return (np.asarray(f.normed_embedding, dtype=np.float32),
+            getattr(f, "kps", None), float(fa))
+
+
+def face_yaw(kps) -> float | None:
+    """Signed yaw proxy in [-1, 1] from the 5-point face landmarks.
+
+    The nose sits midway between the eyes on a head-on view and slides towards
+    the near eye as the head turns, so its offset from the eye midpoint, divided
+    by the interocular distance, tracks yaw. Scale-free and roll-tolerant,
+    because both terms rotate together.
+
+    This is a real geometric measurement of head orientation. It replaces a
+    full-image CLIP distance, which was being read as "a different angle" when
+    what it actually responds to is background, framing, lighting and clothing -
+    a photograph of the same pose in a different room scored as a new viewpoint.
+    """
+    if kps is None or len(kps) < 3:
+        return None
+    le, re, nose = np.asarray(kps[0]), np.asarray(kps[1]), np.asarray(kps[2])
+    axis = re - le
+    d = float(np.hypot(*axis))
+    if d < 1e-3:
+        return None
+    mid = (le + re) / 2.0
+    # Project nose-minus-midpoint onto the eye axis, so head roll does not leak in.
+    t = float(np.dot(nose - mid, axis) / (d * d))
+    return float(np.clip(t * 2.0, -1.0, 1.0))
+
+
+def consensus_identity(items: list[dict], same_face: float = 0.35,
+                       duplicate: float = 0.92) -> dict:
+    """Which references are agreed to show one person, by consensus.
+
+    Taking the single maximum similarity is not verification: it asks only
+    whether SOME other photograph agrees, so two copies of the wrong person
+    vouch for each other and both score perfectly. Near-duplicates have to go
+    first, then agreement has to come from the group rather than from one
+    neighbour.
+
+      1. collapse near-duplicates (>= `duplicate`) to one representative, so
+         repeated copies cannot vote repeatedly
+      2. link representatives that match at all (>= `same_face`) and take the
+         largest connected group - the consensus identity
+      3. score each reference by its MEDIAN similarity to the other members of
+         that group, which a single outlier cannot lift
+
+    Anything outside the consensus group scores zero and is never drawn: an
+    unverified photograph would be conditioning the model on a stranger's face.
+    """
+    faces = [m for m in items if m["face"] is not None]
+    for m in items:
+        m["identity_group"] = None
+        m["agreement"] = 0.0
+        m["duplicate_of"] = None
+    if len(faces) < 2:
+        return {"members": len(faces), "group": [], "duplicates": 0,
+                "note": "too few detectable faces to reach consensus"}
+
+    E = np.stack([m["face"] for m in faces])
+    S = E @ E.T
+
+    # 1. near-duplicate collapse (union-find over the duplicate threshold)
+    parent = list(range(len(faces)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(faces)):
+        for j in range(i + 1, len(faces)):
+            if S[i, j] >= duplicate:
+                parent[find(i)] = find(j)
+    reps: dict[int, int] = {}
+    for i in range(len(faces)):
+        reps.setdefault(find(i), i)
+    rep_idx = sorted(reps.values())
+    n_dup = len(faces) - len(rep_idx)
+    for i in range(len(faces)):
+        r = reps[find(i)]
+        if r != i:
+            faces[i]["duplicate_of"] = faces[r]["file"].name
+
+    # 2. largest connected group among representatives
+    adj = {i: set() for i in rep_idx}
+    for a in range(len(rep_idx)):
+        for b in range(a + 1, len(rep_idx)):
+            i, j = rep_idx[a], rep_idx[b]
+            if S[i, j] >= same_face:
+                adj[i].add(j)
+                adj[j].add(i)
+    seen, best_group = set(), []
+    for start in rep_idx:
+        if start in seen:
+            continue
+        comp, stack = [], [start]
+        seen.add(start)
+        while stack:
+            u = stack.pop()
+            comp.append(u)
+            for v in adj[u] - seen:
+                seen.add(v)
+                stack.append(v)
+        if len(comp) > len(best_group):
+            best_group = comp
+    group = set(best_group)
+    # A duplicate of a group member is in the group too - it is the same photo.
+    members = [i for i in range(len(faces)) if reps[find(i)] in group]
+
+    # 3. median agreement with the OTHER representatives of that group
+    for i in members:
+        others = [j for j in best_group if reps[find(j)] != reps[find(i)]]
+        faces[i]["agreement"] = (round(float(np.median(S[i, others])), 4)
+                                 if others else 0.0)
+        faces[i]["identity_group"] = "consensus"
+    return {"members": len(members), "representatives": len(best_group),
+            "duplicates": n_dup, "candidates": len(faces),
+            "same_face_threshold": same_face, "duplicate_threshold": duplicate}
+
+
 def score_identity(items: list[dict]) -> None:
     """Rate each photograph on how well it serves IDENTITY conditioning, in place.
 
@@ -314,39 +462,37 @@ def score_identity(items: list[dict]) -> None:
     how well it depicts the face, and letting it decide would reintroduce exactly
     the coupling these packs exist to break.
 
-    Agreement is LEAVE-ONE-OUT: each photograph is compared against the face
-    embeddings of the OTHERS, never against a bank that contains itself. Scoring
-    against the whole reference set returns 1.000 for any photo that is in it,
-    which is a self-comparison dressed up as evidence - the same shape of mistake
-    as measuring a mask's overlap with its own complement. What is wanted is
-    whether the rest of the reference set agrees this is the same person.
+    Agreement comes from consensus_identity(), which is neither a self-comparison
+    nor a single maximum: near-duplicates are collapsed first, then a photograph
+    is scored by its MEDIAN similarity to the rest of the agreed group. Both of
+    the shortcuts it replaces gave a perfect score to the wrong answer - scoring
+    against a bank built from these same photographs returned 1.000 for anything
+    already in it, and taking the maximum let two copies of a stranger vouch for
+    each other.
 
-      agreement  leave-one-out face similarity: is this the right person
+      agreement  consensus face similarity: is this the right person
       face_res   how many pixels the face occupies; a correct match at 20 px
                  carries no detail worth transferring
 
     Weighted in that order, because a confident wrong identity is the worst
-    outcome available. Photographs with no detectable face score zero: they can
-    still be the right person, but nothing here can show that they are.
+    outcome available. A photograph with no detectable face, or one outside the
+    consensus group, scores zero: it may well be the right person, but nothing
+    here shows that it is.
     """
-    faces = [m for m in items if m["face"] is not None]
-    E = np.stack([m["face"] for m in faces]) if faces else None
     for m in items:
-        agree = 0.0
-        if m["face"] is not None and E is not None and len(faces) > 1:
-            sims = E @ m["face"]
-            # Drop this photograph's own row rather than trusting a threshold:
-            # a genuine near-duplicate should still count as agreement.
-            own = next(i for i, o in enumerate(faces) if o is m)
-            agree = float(np.max(np.delete(sims, own)))
         w, h = m["size"]
         # sqrt -> a face side length; ~200 px is already ample for conditioning,
         # so the score saturates there instead of rewarding ever-larger portraits.
         px = float(m["face_frac"] or 0.0) * w * h
         res = float(np.clip(np.sqrt(px) / 200.0, 0.0, 1.0))
+        agree = float(m.get("agreement") or 0.0)
         m["identity"] = {"agreement": round(agree, 4),
                          "face_resolution": round(res, 4),
                          "face_pixels": int(px),
+                         "yaw": (round(m["yaw"], 3) if m.get("yaw") is not None
+                                 else None),
+                         "verified": bool(m.get("identity_group") == "consensus"),
+                         "duplicate_of": m.get("duplicate_of"),
                          "score": round(0.7 * agree + 0.3 * res, 4)}
 
 
@@ -411,37 +557,67 @@ def main() -> int:
         # missing viewpoints were a real weakness of these references. Clusters
         # are still computed and recorded, as a diagnostic.
         items = [m for g in groups for m in g["members"]]
+        consensus = consensus_identity(items)
         score_identity(items)
+        log.info("Identity consensus: %d of %d reference(s) with a face agree "
+                 "(%d near-duplicate(s) collapsed first, so repeated copies "
+                 "cannot vote twice)", consensus.get("members", 0),
+                 consensus.get("candidates", 0), consensus.get("duplicates", 0))
         ranked = sorted(items, key=lambda m: (m["identity"]["score"],
                                               m["identity"]["face_pixels"],
                                               m["file"].name), reverse=True)
         for m in ranked:
             i = m["identity"]
-            log.info("%-34s identity %.3f (leave-one-out agreement %.3f, face "
-                     "%d px, cluster %d)", m["file"].name, i["score"],
-                     i["agreement"], i["face_pixels"], m["cluster"])
-        panel_face = ranked[0]
-        if panel_face["identity"]["agreement"] <= 0:
-            log.warning("No reference agrees with any other on identity (too few "
-                        "detectable faces). Identity conditioning will be weak. "
-                        "The garment is unaffected: it comes from the source.")
+            log.info("%-34s identity %.3f (consensus agreement %.3f, face %d px, "
+                     "yaw %s, %s%s)", m["file"].name, i["score"], i["agreement"],
+                     i["face_pixels"],
+                     f"{i['yaw']:+.2f}" if i["yaw"] is not None else "n/a",
+                     "verified" if i["verified"] else "NOT VERIFIED",
+                     f", duplicate of {i['duplicate_of']}"
+                     if i["duplicate_of"] else "")
+        verified = [m for m in ranked if m["identity"]["verified"]]
+        if not verified:
+            log.warning("No reference is identity-verified by consensus. Falling "
+                        "back to the best-scoring photograph; identity "
+                        "conditioning is weak and should not be trusted. The "
+                        "garment is unaffected: it comes from the source.")
+        panel_face = (verified or ranked)[0]
 
-        # A second panel earns its place only by showing a DIFFERENT angle, and
-        # only if it is confidently the same person - an unverified photograph
-        # would be conditioning the model on a stranger's face.
-        MIN_AGREE = 0.45
-        others = [m for m in ranked[1:]
-                  if m["identity"]["agreement"] >= MIN_AGREE]
-        alt = (min(others, key=lambda m: float(np.dot(m["clip"], panel_face["clip"])))
-               if others else None)
+        # A second panel earns its place only by showing a genuinely different
+        # HEAD ORIENTATION, and only if it is identity-verified - an unverified
+        # photograph would condition the model on a stranger's face.
+        #
+        # Ranked by yaw difference where the landmarks give one. The
+        # identity-masked embedding is the fallback for faces the detector could
+        # not land landmarks on; the FULL-image embedding is not used here at
+        # all, because it responds to background, framing and clothing, and a
+        # photograph of the same pose in a different room would win on it.
+        others = [m for m in verified if m is not panel_face
+                  and m["identity"]["duplicate_of"] is None]
+        alt, alt_why = None, ""
+        y0 = panel_face["identity"]["yaw"]
+        with_yaw = [m for m in others if m["identity"]["yaw"] is not None]
+        if y0 is not None and with_yaw:
+            alt = max(with_yaw, key=lambda m: abs(m["identity"]["yaw"] - y0))
+            d = abs(alt["identity"]["yaw"] - y0)
+            alt_why = (f"head yaw differs by {d:.2f} "
+                       f"({y0:+.2f} -> {alt['identity']['yaw']:+.2f})")
+            if d < 0.10:
+                log.info("The most different head orientation available differs "
+                         "by only %.2f; the references all face much the same way, so "
+                         "the second panel adds angle coverage in name only.", d)
+        elif others:
+            alt = min(others, key=lambda m: float(
+                np.dot(m["clip_identity"], panel_face["clip_identity"])))
+            alt_why = ("no landmarks; identity-masked embedding distance "
+                       f"{1 - float(np.dot(alt['clip_identity'], panel_face['clip_identity'])):.3f}")
         if alt is not None:
-            log.info("alternate angle: %s (CLIP similarity to panel 1 %.3f, the "
-                     "most different view among %d verified reference(s))",
-                     alt["file"].name,
-                     float(np.dot(alt["clip"], panel_face["clip"])), len(others))
+            log.info("alternate view: %s (%s; chosen among %d verified, "
+                     "non-duplicate reference(s))", alt["file"].name, alt_why,
+                     len(others))
         else:
-            log.info("No second reference cleared the identity bar (agreement "
-                     ">= %.2f); the pack uses one identity panel.", MIN_AGREE)
+            log.info("No second identity-verified, non-duplicate reference; the "
+                     "pack uses one identity panel.")
         best_g = int(panel_face["cluster"])
 
         # Diagnostic only: how far the chosen photographs' clothing is from what
@@ -484,6 +660,7 @@ def main() -> int:
                         "comes from",
             },
             "identity_selection": panel_face["identity"],
+            "identity_consensus": consensus,
             "source_palette": outfit["palette"],
             "panels": [
                 {"role": "identity_face_only", "provenance": panel_face["file"].name,

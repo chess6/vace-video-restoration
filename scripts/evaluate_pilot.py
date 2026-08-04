@@ -51,8 +51,11 @@ metrics are kept apart accordingly:
   garment_boundary_f     edge agreement at 2 px, which IoU is too blunt to see
   garment_lowfreq_drift  blurred difference inside the garment. Must stay SMALL:
                          this is the structure that was supposed to survive.
-  garment_hf_gain        high-frequency energy vs the source. Should be ABOVE 1:
-                         this is the texture the restoration exists to add.
+  garment_hf_gain        high-frequency energy vs the source. Should be ABOVE 1
+                         for a restoration - but an increase ALONE does not show
+                         texture was restored: ringing, added noise and an
+                         invented weave raise it too. Reported as
+                         high_frequency_increased, never as "texture restored".
   garment_pattern_chi2   gradient-orientation histogram distance - a changed
                          weave or print rather than a sharper one
   accessories_*          accessory classes invented or dropped, by name
@@ -434,7 +437,13 @@ def garment_structure(var_path: Path, src_path: Path, mask_path: Path,
     # cannot quietly average them into "fine".
     out["structure_preserved"] = bool(out["garment_iou"] > 0.75
                                       and out["garment_lowfreq_drift"] < 8.0)
-    out["texture_restored"] = bool(out["garment_hf_gain"] > 1.0)
+    # Deliberately NOT called "texture_restored". All this measures is that
+    # high-frequency energy went up, and ringing, added noise and a hallucinated
+    # weave all raise it just as reliably as genuine restored fabric does.
+    # Calling it "restored" would be asserting the conclusion the metric cannot
+    # reach. Pattern agreement (garment_pattern_chi2) and temporal stability are
+    # reported alongside it; a restoration claim needs all three to hold.
+    out["high_frequency_increased"] = bool(out["garment_hf_gain"] > 1.0)
     return out
 
 
@@ -529,23 +538,32 @@ def main() -> int:
                  if m.get("bg_drift_vs_plate") is not None else "")
         if m.get("garment_iou") is not None:
             log.info("%-28s garment: iou=%.3f boundaryF=%s lowfreq=%.1f "
-                     "hf_gain=%.2f pattern=%.3f  -> structure %s, texture %s%s",
+                     "hf_gain=%.2f pattern=%.3f  -> structure %s, %s%s",
                      "", m["garment_iou"],
                      ("%.3f" % m["garment_boundary_f"]
                       if m.get("garment_boundary_f") is not None else "n/a"),
                      m["garment_lowfreq_drift"], m["garment_hf_gain"],
                      m["garment_pattern_chi2"],
                      "PRESERVED" if m["structure_preserved"] else "MOVED",
-                     "RESTORED" if m["texture_restored"] else "LOST",
+                     "HF UP" if m["high_frequency_increased"] else "HF DOWN",
                      ("  accessories invented: "
                       + ", ".join(m["accessories_invented"])
                       if m.get("accessories_invented") else ""))
 
     rp = args.report or (P.reports / "pilot_metrics.json")
     rp.parent.mkdir(parents=True, exist_ok=True)
-    rp.write_text(json.dumps({"pilot": pilot, "chunk": cid, "variants": out},
-                             indent=2) + "\n")
-    log.info("Metrics -> %s", rel(rp))
+    # A pilot is an INTERVAL and can span several chunks, so the report names all
+    # of them. This used to reference an undefined `cid`, which raised NameError
+    # at the very last statement - after every metric had been computed - so the
+    # report was never written at all and the whole evaluation was lost.
+    rp.write_text(json.dumps({"pilot": pilot,
+                              "chunks": list(spec.get("chunks", [])),
+                              "interval": iv,
+                              "variants": out}, indent=2) + "\n")
+    if not out:
+        log.warning("No variant produced metrics; the report records an empty "
+                    "set rather than pretending the comparison happened.")
+    log.info("Metrics for %d variant(s) -> %s", len(out), rel(rp))
     log.info("These are statistics, not a verdict. Open the comparison videos "
              "yourself and fill in reports/pilot_results.md.")
     return 0

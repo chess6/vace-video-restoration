@@ -22,7 +22,9 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from composite_subject import occluder_alpha  # noqa: E402
+from composite_subject import (  # noqa: E402
+    occluder_alpha, stabilize_occluder_alpha,
+)
 
 BAND = 2
 
@@ -85,9 +87,8 @@ def test_temporal_smoothing(f: Failures) -> None:
         prev, crawl = None, []
         for i in range(12):
             occ = disc(dx=(i % 2) if jitter else 0)
-            a = occluder_alpha(as_u8(occ), BAND)
-            if smooth > 0 and prev is not None:
-                a = (1.0 - smooth) * a + smooth * prev
+            a = stabilize_occluder_alpha(occluder_alpha(as_u8(occ), BAND),
+                                         prev, smooth)
             if prev is not None:
                 crawl.append(float(np.abs(a - prev).mean()))
             prev = a
@@ -102,9 +103,53 @@ def test_temporal_smoothing(f: Failures) -> None:
             "smoothing introduced movement into a static occluder")
 
 
+def test_smoothing_never_contradicts_the_current_frame(f: Failures) -> None:
+    """An occluder crossing the frame, which is where a naive blend breaks.
+
+    Two failures, both visible on screen: alpha trailing behind the occluder as
+    a smear of transparency over background it has already left, and the old
+    alpha eating into the core it has just arrived in, so the generated figure
+    shows through a solid object. Neither may survive the blend.
+    """
+    import cv2
+    prev = None
+    worst_trail, worst_hollow, ramp_seen = 0.0, 0.0, 0
+    for i in range(14):
+        occ = disc(dx=6 * i - 40)                 # a fast, steady traverse
+        cur = occluder_alpha(as_u8(occ), BAND)
+        a = stabilize_occluder_alpha(cur, prev, 0.35)
+
+        outside = ~occ
+        core = cv2.erode(occ.astype(np.uint8),
+                         np.ones((2 * BAND + 3, 2 * BAND + 3), np.uint8)).astype(bool)
+        if outside.any():
+            worst_trail = max(worst_trail, float(1.0 - a[outside].min()))
+        if core.any():
+            worst_hollow = max(worst_hollow, float(a[core].max()))
+        ramp = (cur > 0.0) & (cur < 1.0)
+        if ramp.any() and prev is not None and not np.allclose(a[ramp], cur[ramp]):
+            ramp_seen += 1                        # the blend did something
+        # Nothing outside the ramp may differ from the unsmoothed alpha.
+        f.check(bool(np.array_equal(a[~ramp], cur[~ramp])),
+                f"frame {i}: smoothing changed alpha outside the current ramp")
+        prev = a
+
+    f.check(worst_trail == 0.0,
+            f"alpha as low as {1 - worst_trail:.3f} trailed OUTSIDE the current "
+            f"occluder; the figure would fade over background it no longer covers")
+    f.check(worst_hollow == 0.0,
+            f"alpha rose to {worst_hollow:.3f} inside the current opaque core; "
+            f"the generated figure would show through a solid object")
+    f.check(ramp_seen > 0,
+            "the blend never altered the ramp, so this test proves nothing about "
+            "smoothing - only that it is disabled")
+
+
 def main() -> int:
     f = Failures()
-    for t in (test_one_sided, test_degenerate_cases, test_temporal_smoothing):
+    for t in (test_one_sided, test_degenerate_cases,
+              test_temporal_smoothing,
+              test_smoothing_never_contradicts_the_current_frame):
         t(f)
     if f:
         print(f"FAILED: {len(f)} check(s)")
