@@ -110,11 +110,25 @@ def mask_to_identity(im, labels, feather: int = 3, allowed: set | None = None):
     """
     from PIL import Image
     arr = np.asarray(im).astype(np.float32)
-    m = identity_regions(labels, allowed).astype(np.float32)
+    hard = identity_regions(labels, allowed)
+    m = hard.astype(np.float32)
     if feather > 0:
         import cv2
         r = feather * 2 + 1
-        m = cv2.GaussianBlur(m, (r, r), 0)
+        # Erode first, blur, then re-multiply by the hard mask. The ramp then
+        # lies entirely INSIDE the identity region and no pixel outside it keeps
+        # any of its original value.
+        #
+        # A plain blur ramps OUTWARDS. Measured on a real reference, that let up
+        # to 83/255 of the true pixel survive in a ring around the head - and the
+        # pixels immediately around a head are neck and shoulders. On a
+        # photograph where the subject is bare-chested and the footage shows
+        # them wearing a top, that ring is a hint to take it off. Same
+        # one-sided reasoning as the occluder boundary in composite_subject.py:
+        # the ramp may only ever give ground inwards.
+        k = np.ones((2 * feather + 1,) * 2, np.uint8)
+        inner = cv2.erode(hard.astype(np.uint8), k).astype(np.float32)
+        m = cv2.GaussianBlur(inner, (r, r), 0) * m
     # Neutral mid-grey, not black: a large black field shifts the exposure the
     # model infers from the panel.
     out = arr * m[..., None] + 128.0 * (1.0 - m[..., None])

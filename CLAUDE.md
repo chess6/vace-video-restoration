@@ -99,6 +99,18 @@ content itself, or pulling frames into a conversation.
 This composes with rule 1: rule 1 forbids showing media to the user, rule 2b
 forbids the agent examining it.
 
+**Narrow exceptions, when the user grants them.** The user may permit inspection
+of specific files, or of a specific interval of one. Such a grant is recorded in
+`intermediate/inspection_allowlist.txt` — untracked, because naming the user's
+files in a tracked file is itself the leak rule 2a exists to prevent — and acted
+on only through `scripts/inspect_allowed.py`, which refuses anything not listed
+and refuses any second outside a listed interval. Write the permission down
+there; do not carry it in your head, and do not let a grant for one moment of a
+file become a grant for the file.
+
+Rule 1 is never relaxed by such a grant. Frames go to disk and stay there.
+Inspecting is not displaying.
+
 ## 3. Never silently fall back to CPU
 
 If CUDA is unavailable, fail loudly. `common.require_cuda()` exists for this.

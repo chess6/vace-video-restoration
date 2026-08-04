@@ -111,12 +111,20 @@ def test_masking_removes_clothing(f: Failures) -> None:
         f.append("SKIPPED feathered check: OpenCV is not installed in this "
                  "checkout, so the blur path could not be exercised")
         return
-    core = np.zeros(labels.shape, bool)
-    core[34:50, 14:34] = True          # well inside the garment band
-    worst = int(np.abs(soft[core] - 128).max())
+    # NOTHING outside the identity region may keep any of its original value,
+    # not merely the middle of the garment. A blur that ramps outwards leaves a
+    # ring of real pixels around the head - measured at 83/255 on a real
+    # reference - and the pixels around a head are neck and shoulders.
+    outside = ~identity_regions(labels)
+    worst = int(np.abs(soft[outside] - 128).max())
     f.check(worst == 0,
-            f"garment colour survives {worst}/255 into the feathered panel; "
-            f"a faint jacket is still a jacket")
+            f"{worst}/255 of the original survives OUTSIDE the identity region "
+            f"after feathering; the ramp must lie inside it, never spread out "
+            f"of it")
+    f.check(not np.array_equal(soft[identity_regions(labels)],
+                               np.full(int(identity_regions(labels).sum()) * 3,
+                                       128).reshape(-1, 3)),
+            "the feathered panel blanked the identity region too")
 
 
 def test_source_panel_is_untouched(f: Failures) -> None:
