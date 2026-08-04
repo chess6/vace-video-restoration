@@ -96,6 +96,89 @@ prompt:
     flickering, ghosting, blurry, low quality, jpeg artifacts, oversaturated,
     cartoon, anime, painting, illustration, text, watermark, caption, logo, border
 
+# ---------------------------------------------------------------------------
+# Stages added after this profile was first written. All UNVERIFIED at 720p:
+# every number below is the local setting scaled by the resolution change and
+# the extra VRAM, and none of it has been run. Benchmark on the rented box.
+# ---------------------------------------------------------------------------
+
+background:
+  enabled: true
+  # 48 GB makes the 7B model reachable, which the 12 GB card never was. Start on
+  # 3B fp16 - it is the configuration whose OUTPUT has actually been inspected
+  # locally, so it is the one whose failure modes are known. Move to 7B only
+  # after a side-by-side on the rented box, not on the assumption that bigger is
+  # better: more capacity also means more invented signage and distant faces.
+  model: seedvr2_3b_fp16.safetensors
+  vae: seedvr2_ema_vae_fp16.safetensors
+  weight_dtype: default          # no fp8 needed at 48 GB
+  chunking_mode: manual
+  # Wider temporal chunks are affordable here, and fewer seams is the main
+  # quality gain available from the extra VRAM. Must stay 4n+1.
+  frames_per_chunk: 41
+  temporal_overlap: 2            # LATENT frames; clamped to (fpc-1)/4
+  vae_tile_size: 1024
+  vae_tile_overlap: 128
+  target_short_edge: 720         # already native at this resolution
+  profiles:
+    background_conservative:
+      steps: 12
+      cfg: 1.0
+      denoise: 0.75
+      color_correction: lab
+      description: >-
+        Prioritises structural and temporal fidelity. Least likely to invent
+        detail, alter signage or mutate distant faces.
+    background_aggressive:
+      steps: 25
+      cfg: 1.0
+      denoise: 1.0
+      color_correction: wavelet
+      description: >-
+        Reconstructs stronger plausible environmental detail. Expect more
+        invented texture, and check signage and distant faces before trusting it.
+
+roi:
+  # Off by default at 720p, and this is a real decision rather than an oversight.
+  # The ROI pass exists to buy subject resolution the model would not otherwise
+  # get. At 1280x720 with 14B the figure already receives far more pixels than
+  # the local 720x544 pass could give it, so the crop mostly costs context and
+  # adds a warp/unwarp round trip. Turn it on only if a measured pilot on the
+  # rented box shows the subject still under-resolved.
+  enabled: false
+  target_height_fraction: 0.78
+  target_height_fraction_max: 0.80
+  height_percentile: 90
+  containment_percentile: 95
+  min_useful_scale: 1.15
+  context_margin: 0.18
+  max_subject_clip: 0.02
+  max_crop_motion_px: 3.0
+
+composite:
+  path: composite
+  # Scaled with resolution: these are pixel widths, and the frame is ~1.8x wider
+  # than the local pass in each axis.
+  band_px: 5
+  center_band: true
+  occluder_band_px: 4
+  occluder_temporal_smooth: 0.35
+
+pose:
+  # Same alternative-to-depth relationship as locally: chosen by control.profile,
+  # never blended with depth.
+  enabled: true
+  model: sdpose_wholebody_fp16.safetensors
+  batch_size: 16                 # more VRAM to spend on throughput
+  draw_body: true
+  draw_hands: true
+  draw_face: true
+  draw_feet: true
+  draw_head: true
+  stick_width: 6                 # scaled with resolution
+  face_point_size: 5
+  score_threshold: 0.3
+
 output:
   fps: 16
   chunk_codec: ffv1
