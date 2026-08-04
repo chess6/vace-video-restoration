@@ -715,6 +715,29 @@ def main() -> int:
                  "similar" if same_look else "a different outfit"
                  if best_d == best_d else "no shared garment class")
 
+        # Does the source show a covered face? If so, an external photograph of
+        # an uncovered one must not condition the face: that would remove what
+        # the person is actually wearing. make_protected_mask.py decides this;
+        # absent its verdict we fail closed and assume covered.
+        _shot = next(x for x in man["shots"] if x["shot_id"] == sid)
+        prot = _shot.get("protected_mask") or {}
+        face_ok = bool(prot.get("face_conditioning_allowed"))
+        if not prot:
+            face_ok = False
+            log.warning("%s: no protected-mask analysis, so it is unknown whether "
+                        "the source face is covered. Failing closed: external "
+                        "FACE conditioning is disabled and only hair is used. "
+                        "Run scripts/make_protected_mask.py first.", sid)
+        elif not face_ok:
+            log.warning("%s: the source face is COVERED. External face "
+                        "conditioning is disabled; only hair is conditioned, so "
+                        "an uncovered photograph cannot instruct the model to "
+                        "take the covering off.", sid)
+        allowed = IDENTITY_ONLY if face_ok else (IDENTITY_ONLY - {"face"})
+        log.info("%s: external photographs may condition %s (source face %s)",
+                 sid, "+".join(sorted(allowed)) or "NOTHING",
+                 "exposed" if face_ok else "covered/unknown")
+
         pack = {
             "shot_id": sid,
             "cluster": best_g,

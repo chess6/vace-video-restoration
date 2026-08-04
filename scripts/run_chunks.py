@@ -178,6 +178,12 @@ def main() -> int:
     var.add_argument("--seed", type=int, default=None, help="Override the seed")
     var.add_argument("--steps", type=int, default=None)
     var.add_argument("--tag", default="", help="Suffix for output filenames")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Run every check - tracking approval, pre-flight, "
+                         "staleness, stream alignment - and report what WOULD "
+                         "be generated, then stop without touching the GPU. "
+                         "Use this to verify a guard rather than discovering it "
+                         "passed by watching a chunk start rendering.")
     ap.add_argument("--timeout", type=float, default=5400)
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
@@ -464,6 +470,16 @@ def main() -> int:
     check_geometry(man, log, stage="run_chunks")
     log.info("Pre-flight OK: depth%s present for all %d chunk(s)",
              " and masks" if use_mask else "", len(chunks))
+
+    if args.dry_run:
+        log.info("=" * 62)
+        log.info("DRY RUN. All checks passed and %d chunk(s) WOULD be generated:",
+                 len(chunks))
+        for c in chunks:
+            log.info("  %-22s %d frames %dx%d  key %s", c["chunk_id"],
+                     c["n_frames"], c["width"], c["height"], vace_key(c))
+        log.info("Nothing was generated and the GPU was not touched.")
+        return 0
 
     P.restored_480p.mkdir(parents=True, exist_ok=True)
     done = failed = stale = 0
