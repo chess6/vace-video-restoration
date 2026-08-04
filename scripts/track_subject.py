@@ -909,7 +909,18 @@ def main() -> int:
                             [seed_frame] + [e["frame"] for e in events[:6]], log)
 
         shot["subject_confidence"] = round(float(conf), 4)
-        if shot.get("subject_status") not in ("needs_user", "subject_absent"):
+        if manual:
+            # A manual seed IS the answer to the question needs_user was asking,
+            # so it clears that flag. Leaving it set meant a stale flag from an
+            # earlier automatic attempt outlived the human's correction and kept
+            # the shot blocked forever with no way to unblock it.
+            #
+            # It does NOT stand in for approval: someone still has to look at the
+            # review sheet and confirm the mask follows the right figure for the
+            # whole shot, which is a different question from who to start from.
+            shot["subject_status"] = "manual"
+            shot.pop("subject_note", None)
+        elif shot.get("subject_status") not in ("needs_user", "subject_absent"):
             shot["subject_status"] = "auto"
         report.append({
             "shot_id": sid, "status": shot["subject_status"],
@@ -986,7 +997,9 @@ def main() -> int:
         "subject_absent": sorted(sid for sid, s in merged.items()
                                  if s.get("status") == "subject_absent"),
     }, indent=2))
-    needs_user = all_needs
+    needs_user = [s for s in all_needs
+                  if next((x for x in man["shots"] if x["shot_id"] == s), {})
+                  .get("subject_status") != "manual"]
     absent_shots = sorted(sid for sid, s in merged.items()
                           if s.get("status") == "subject_absent")
 
