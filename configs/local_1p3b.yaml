@@ -236,6 +236,19 @@ composite:
   # Erode the hard mask by half the band before ramping, so the ramp straddles
   # the true silhouette instead of eating into the subject.
   center_band: true
+  # Layer 3 - the foreground kept ABOVE the generated figure. Its pixels come
+  # from the restored plate, so an occluder still gains SeedVR2's detail without
+  # ever passing through VACE.
+  #
+  # The boundary is ONE-SIDED: the ramp lies entirely inside the occluder, so it
+  # can only lose it a sliver, never let the generated figure spread over whoever
+  # is in front. The core stays fully opaque.
+  occluder_band_px: 2
+  # Carry this fraction of the previous frame's foreground alpha. The occluder is
+  # re-segmented every frame and its edge lands differently each time; a little
+  # carry-over stops that crawling. Keep it low - too much drags a ghost behind a
+  # fast-moving occluder. 0 disables it.
+  occluder_temporal_smooth: 0.35
 
 mask:
   # Feather radius in pixels applied to the tracked figure mask.

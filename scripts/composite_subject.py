@@ -59,18 +59,49 @@ def alpha_from_mask(mask_u8: np.ndarray, band_px: int, center: bool) -> np.ndarr
     return np.clip(a, 0.0, 1.0)
 
 
+def occluder_alpha(occ_u8: np.ndarray, band_px: int) -> np.ndarray:
+    """How much of the generated figure survives where something is in front.
+
+    Returns 1 away from the occluder, 0 in its opaque core, and a ramp between -
+    laid ONE-SIDED, entirely inside the occluder. That direction matters. A
+    symmetric ramp would spread half its width outwards, blending generated
+    figure over pixels that belong to whoever is actually in front, which is the
+    same over-painting the occluder layer exists to prevent. Growing it inwards
+    can only ever lose a sliver of occluder to the figure, never the reverse.
+
+    A fully hard edge was the previous behaviour. It is correct about ownership
+    but reads as a cut-out, because the tracked boundary lands on a different
+    pixel each frame; a couple of pixels of ramp absorbs that jitter without
+    giving the figure any ground.
+    """
+    import cv2
+    occ = occ_u8 > 127
+    a = np.ones(occ.shape, np.float32)
+    if not occ.any():
+        return a
+    if band_px <= 0:
+        a[occ] = 0.0
+        return a
+    # Distance INTO the occluder: 0 at its silhouette, growing inwards.
+    d = cv2.distanceTransform(occ.astype(np.uint8), cv2.DIST_L2, 3)
+    a[occ] = np.clip(1.0 - d[occ] / float(band_px), 0.0, 1.0)
+    return a
+
+
 def composite(subject: Path, background: Path, mask: Path, out: Path,
               band_px: int, center: bool, fps: int, log,
-              occluders: Path | None = None) -> dict:
+              occluders: Path | None = None, occ_band_px: int = 2,
+              occ_smooth: float = 0.0) -> dict:
     """Per-frame alpha composite, in explicit layer order. Streams to disk.
 
         1. restored environment (background plate)
         2. generated target figure
         3. preserved foreground: occluders, held objects, other people
 
-    Layer 3 is taken from the plate, never regenerated. Without it the figure is
-    pasted over anyone crossing in front of it, which reads as broken interaction
-    however good the figure itself looks.
+    Layer 3 is taken from the plate, never regenerated: the occluder's own pixels
+    are the RESTORED original, so they get SeedVR2's detail without ever passing
+    through VACE. Without this layer the figure is pasted over anyone crossing in
+    front of it, which reads as broken interaction however good the figure looks.
     """
     import cv2
     import subprocess
@@ -93,6 +124,8 @@ def composite(subject: Path, background: Path, mask: Path, out: Path,
 
     n = 0
     alpha_sum = 0.0
+    occ_prev: np.ndarray | None = None
+    occ_frames = 0
     while True:
         oks, fs = caps["subject"].read()
         okb, fb = caps["background"].read()
@@ -107,11 +140,21 @@ def composite(subject: Path, background: Path, mask: Path, out: Path,
         if "occ" in caps:
             oko, fo = caps["occ"].read()
             if oko:
-                # Layer 3: anything in front of the subject wins. Hard-edged on
-                # purpose - these pixels are the ORIGINAL, and feathering them
-                # would blend the generated figure back over the occluder.
-                occ = cv2.cvtColor(fo, cv2.COLOR_BGR2GRAY) > 127
-                a[occ] = 0.0
+                # Layer 3: anything in front of the subject wins, with an opaque
+                # core and a narrow one-sided boundary (see occluder_alpha).
+                oa = occluder_alpha(cv2.cvtColor(fo, cv2.COLOR_BGR2GRAY),
+                                    occ_band_px)
+                if occ_smooth > 0 and occ_prev is not None:
+                    # The occluder silhouette is re-segmented every frame and its
+                    # boundary lands a pixel or two differently each time. Carry a
+                    # little of the previous frame's alpha so the edge does not
+                    # crawl. Kept low deliberately: too much smoothing drags a
+                    # ghost of the occluder behind a fast-moving one.
+                    oa = (1.0 - occ_smooth) * oa + occ_smooth * occ_prev
+                occ_prev = oa
+                if (oa < 1.0).any():
+                    occ_frames += 1
+                a = a * oa
         alpha_sum += float(a.mean())
         a3 = a[:, :, None]
         blended = (fs.astype(np.float32) * a3 + fb.astype(np.float32) * (1.0 - a3))
@@ -129,9 +172,14 @@ def composite(subject: Path, background: Path, mask: Path, out: Path,
     got = probe_frames(out)
     if got != n:
         raise RuntimeError(f"wrote {n} frames but {out.name} decodes {got}")
-    log.info("Composited %d frame(s) -> %s (mean subject coverage %.2f%%)",
-             n, rel(out), 100 * alpha_sum / n)
-    return {"frames": n, "mean_alpha": alpha_sum / n}
+    log.info("Composited %d frame(s) -> %s (mean subject coverage %.2f%%%s)",
+             n, rel(out), 100 * alpha_sum / n,
+             f"; foreground layer active on {occ_frames}/{n} frame(s), "
+             f"{occ_band_px} px one-sided boundary, temporal smoothing "
+             f"{occ_smooth:.2f}" if "occ" in caps else "")
+    return {"frames": n, "mean_alpha": alpha_sum / n,
+            "occluded_frames": occ_frames, "occluder_band_px": occ_band_px,
+            "occluder_temporal_smooth": occ_smooth}
 
 
 def main() -> int:
@@ -186,7 +234,9 @@ def main() -> int:
         log.info("Foreground layer: %s kept above the generated figure", rel(occ))
     composite(args.subject, args.background, mask, args.out, band,
               bool(comp.get("center_band", True)), int(c["fps"]), log,
-              occluders=occ)
+              occluders=occ,
+              occ_band_px=int(comp.get("occluder_band_px", 2)),
+              occ_smooth=float(comp.get("occluder_temporal_smooth", 0.35)))
     return 0
 
 
