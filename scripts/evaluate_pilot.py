@@ -45,7 +45,12 @@ reference photographs - they show a different outfit, so agreeing with them
 would be the failure, not the goal. The brief pulls in two directions and the
 metrics are kept apart accordingly:
 
-  garment_deltaE         colour distance from the source palette
+  garment_deltaE         area-weighted colour distance from the source, measured
+                         on the SAME frame over regions the source's own parse
+                         defines, so both are read from identical pixels. The
+                         source measured against itself must score ~0; that
+                         control is what caught the earlier sample-dependent
+                         version scoring 39.6 on it.
   garment_temporal_dE    how much that colour crawls between frames
   garment_iou            silhouette overlap with the source's parsed garment
   garment_boundary_f     edge agreement at 2 px, which IoU is too blunt to see
@@ -261,10 +266,17 @@ def garment_metrics(path: Path, mask_path: Path, source_palette: dict,
         return {"garment_classes_found": 0}
     return {"garment_classes_found": len(seen),
             "garment_classes": seen,
-            "garment_deltaE": round(float(np.mean(drift)), 2),
-            "garment_deltaE_worst": round(float(np.max(drift)), 2),
-            "garment_temporal_dE": round(float(np.mean(temporal)), 2),
-            "outfit_mutation": bool(np.max(drift) > 10.0)}
+            # SECONDARY, and sample-dependent: the pack palette was computed on
+            # the sharpest frames of the interval while this is computed on
+            # evenly spaced ones, so the two never see identical lighting or
+            # pose. Measuring the source against itself this way scores ~40,
+            # which is why the primary garment_deltaE is measured same-frame in
+            # garment_structure() instead. Kept only as a cross-check.
+            "garment_deltaE_vs_pack_palette": round(float(np.mean(drift)), 2),
+            "garment_deltaE_vs_pack_palette_worst": round(float(np.max(drift)), 2),
+            # This one is sound on its own terms: it is the spread WITHIN this
+            # variant across frames, so no cross-sample comparison is involved.
+            "garment_temporal_dE": round(float(np.mean(temporal)), 2)}
 
 
 ACCESSORY = {"hat", "bag", "belt", "scarf", "left_shoe", "right_shoe"}
@@ -377,6 +389,7 @@ def garment_structure(var_path: Path, src_path: Path, mask_path: Path,
     gids = [i for i, n in LBL.items() if n in GARMENT]
 
     ious, bfs, lows, hfs, chis = [], [], [], [], []
+    drift_w, drift_worst, cls_drift = [], [], {}
     per_class: dict[str, list] = {}
     invented: dict[str, int] = {}
     dropped: dict[str, int] = {}
@@ -406,6 +419,38 @@ def garment_structure(var_path: Path, src_path: Path, mask_path: Path,
                 elif sa > 0.01 and sb < 0.002:
                     dropped[name] = dropped.get(name, 0) + 1
 
+        # Garment colour drift, measured on THIS frame over regions the SOURCE's
+        # own parse defines, and read from both images at the same pixels.
+        #
+        # Comparing against the stored pack palette instead was invalid three
+        # ways, and the source-vs-itself control proved it by scoring 39.6 when
+        # it must score 0: the two palettes came from DIFFERENT frame samples
+        # (the pack takes the sharpest frames, the evaluator evenly spaced ones),
+        # a class present in one frame of six carried the same weight as one
+        # present in all six, and SegFormer moves the same physical garment
+        # between `dress`, `upper` and `skirt` from frame to frame, so per-class
+        # comparison was not comparing the same cloth.
+        s_lab = cv2.cvtColor(s_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+        v_lab = cv2.cvtColor(v_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+        per_class_dE, weights = [], []
+        for idx, name in LBL.items():
+            if name not in GARMENT:
+                continue
+            reg = ls == idx
+            n_px = int(reg.sum())
+            if n_px < max(64, int(0.005 * gs.size)):
+                continue                     # too small to be a stable region
+            a = [float(np.median(s_lab[..., ch][reg])) for ch in range(3)]
+            b = [float(np.median(v_lab[..., ch][reg])) for ch in range(3)]
+            dE = float(np.sqrt(sum((x - y) ** 2 for x, y in zip(a, b))))
+            per_class_dE.append(dE)
+            weights.append(n_px)
+            cls_drift.setdefault(name, []).append(dE)
+        if per_class_dE:
+            w = np.asarray(weights, np.float64)
+            drift_w.append(float(np.average(per_class_dE, weights=w)))
+            drift_worst.append(float(np.max(per_class_dE)))
+
         sg = cv2.cvtColor(s_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
         vg = cv2.cvtColor(v_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
         lo_s = cv2.GaussianBlur(sg, (0, 0), 4.0)
@@ -432,6 +477,18 @@ def garment_structure(var_path: Path, src_path: Path, mask_path: Path,
                               for k, v in sorted(per_class.items())},
         "accessories_invented": invented,
         "accessories_dropped": dropped,
+        # Area-weighted, so a class covering a handful of pixels cannot dominate.
+        "garment_deltaE": (round(float(np.median(drift_w)), 2)
+                           if drift_w else None),
+        "garment_deltaE_worst_class": (round(float(np.median(drift_worst)), 2)
+                                       if drift_worst else None),
+        "garment_deltaE_by_class": {
+            k: round(float(np.median(v)), 2)
+            for k, v in sorted(cls_drift.items())
+            # Only classes the source parse found on most probe frames. A class
+            # seen once is a parser flicker, not a garment.
+            if len(v) >= max(2, len(ious) // 2)},
+        "outfit_mutation": bool(drift_w and float(np.median(drift_w)) > 10.0),
     }
     # The two directions of the brief, stated as one boolean each so a report
     # cannot quietly average them into "fine".
@@ -447,6 +504,86 @@ def garment_structure(var_path: Path, src_path: Path, mask_path: Path,
     return out
 
 
+def reference_identity(log):
+    """Face embeddings of the consensus-verified references, once per run.
+
+    Reuses the same consensus machinery the pack uses, so "the person the
+    references agree on" means the same thing in both places, and an unverified
+    photograph cannot quietly become the identity target here either.
+    """
+    from PIL import Image, ImageOps
+    import track_subject as T
+    from common import IMAGE_EXTS
+    from make_reference_pack import consensus_identity, face_detail
+
+    models = T.Models(log)
+    items = []
+    for f in sorted(p for p in P.references.iterdir()
+                    if p.is_file() and p.suffix.lower() in IMAGE_EXTS):
+        try:
+            im = ImageOps.exif_transpose(Image.open(f)).convert("RGB")
+        except Exception:
+            continue
+        emb, _, frac = face_detail(models, im)
+        items.append({"file": f, "face": emb, "face_frac": frac,
+                      "size": list(im.size)})
+    info = consensus_identity(items)
+    embs = [m["face"] for m in items
+            if m.get("identity_group") == "consensus" and m["face"] is not None]
+    log.info("Identity target: %d consensus-verified reference face(s) of %d",
+             len(embs), info.get("candidates", 0))
+    return models, (np.stack(embs) if embs else None)
+
+
+def identity_metrics(path: Path, mask_path: Path, models, bank, n_probe: int,
+                     log) -> dict:
+    """How much the generated face agrees with the external references.
+
+    This is the ONLY thing the external photographs are allowed to influence, so
+    it is measured and reported entirely apart from garment fidelity. Comparing
+    the same number for the source says whether conditioning improved identity
+    or merely changed it - a variant that agrees less than the 240p source did
+    has made the face worse, however sharp it looks.
+    """
+    import cv2
+    from PIL import Image
+    from make_reference_pack import face_detail
+    if bank is None:
+        return {}
+    cap, mcap = cv2.VideoCapture(str(path)), cv2.VideoCapture(str(mask_path))
+    frames, masks = [], []
+    while True:
+        ok, f = cap.read()
+        okm, m = mcap.read()
+        if not (ok and okm):
+            break
+        frames.append(f)
+        masks.append(cv2.cvtColor(m, cv2.COLOR_BGR2GRAY) > 127)
+    cap.release(); mcap.release()
+    if not frames:
+        return {}
+    idx = np.linspace(0, len(frames) - 1, min(n_probe, len(frames))).astype(int)
+    sims, found = [], 0
+    for i in idx:
+        if masks[i].sum() < 64:
+            continue
+        ys, xs = np.where(masks[i])
+        crop = frames[i][ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        emb, _, _ = face_detail(models, Image.fromarray(rgb))
+        if emb is None:
+            continue
+        found += 1
+        sims.append(float(np.max(bank @ emb)))
+    if not sims:
+        return {"identity_face_frames": 0,
+                "identity_note": "no face was detectable in the subject region"}
+    return {"identity_face_frames": found,
+            "identity_frames_probed": int(len(idx)),
+            "identity_similarity": round(float(np.median(sims)), 4),
+            "identity_similarity_worst": round(float(np.min(sims)), 4)}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -457,6 +594,9 @@ def main() -> int:
     ap.add_argument("--no-garment", action="store_true",
                     help="Skip clothing parsing (faster; loses colour drift)")
     ap.add_argument("--garment-frames", type=int, default=6)
+    ap.add_argument("--no-identity", action="store_true",
+                    help="Skip face identity scoring (faster; loses the "
+                         "separate identity-from-references measurement)")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -498,6 +638,14 @@ def main() -> int:
         log.warning("Mask has %d frames but the interval has %d; metrics use the "
                     "shorter.", len(masks), len(source))
 
+    id_models, id_bank = (None, None)
+    if not args.no_identity:
+        try:
+            id_models, id_bank = reference_identity(log)
+        except Exception as e:
+            log.warning("Identity scoring unavailable (%s); garment and "
+                        "background metrics are unaffected.", e)
+
     out = {}
     for name, entry in variants.items():
         path = P.root / entry["path"]
@@ -523,6 +671,12 @@ def main() -> int:
             except Exception as e:
                 log.warning("%s: garment structure metrics unavailable (%s)",
                             name, e)
+        if id_bank is not None and mask_path.exists():
+            try:
+                m.update(identity_metrics(path, mask_path, id_models, id_bank,
+                                          args.garment_frames, log))
+            except Exception as e:
+                log.warning("%s: identity metrics unavailable (%s)", name, e)
         m["path"] = rel(path)
         m["describes"] = entry.get("describes", "")
         out[name] = m
@@ -536,6 +690,14 @@ def main() -> int:
                  f"  plate_drift={m['bg_drift_vs_plate']:.2f} "
                  f"within2={m['bg_preserved_within_2']:.3f}"
                  if m.get("bg_drift_vs_plate") is not None else "")
+        if m.get("identity_similarity") is not None:
+            log.info("%-28s identity: agreement with the external references "
+                     "%.3f (worst %.3f) on %d/%d probed frame(s)", "",
+                     m["identity_similarity"], m["identity_similarity_worst"],
+                     m["identity_face_frames"], m["identity_frames_probed"])
+        elif m.get("identity_face_frames") == 0:
+            log.info("%-28s identity: no face detectable in the subject region",
+                     "")
         if m.get("garment_iou") is not None:
             log.info("%-28s garment: iou=%.3f boundaryF=%s lowfreq=%.1f "
                      "hf_gain=%.2f pattern=%.3f  -> structure %s, %s%s",

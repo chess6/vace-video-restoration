@@ -63,6 +63,11 @@ PLAN = [
      "VACE preserving the aggressive plate directly."),
     ("vace_pathB_aggressive", "baseline", "background_aggressive", "B",
      "Baseline VACE subject composited onto the aggressive plate."),
+    ("vace_roi_conservative", "roi", "background_conservative", "R",
+     "Subject generated on the stabilized ROI crop, then mapped back to full "
+     "frame over the conservative plate. Only the masked figure comes from the "
+     "ROI pass: it saw a different framing, so its idea of the background is "
+     "not comparable and must not leak in."),
 ]
 
 
@@ -167,9 +172,9 @@ def main() -> int:
                 p = plate_path(c, profile)
             elif path == "A":
                 p = vace_output(c, tag)
-            else:                                  # composited below
+            else:                                  # composited/mapped below
                 p = None
-            if path != "B":
+            if path not in ("B", "R"):
                 if p is None or not Path(p).exists():
                     gap = (f"{name}: {c['chunk_id']} missing "
                            + (f"VACE output for tag {tag!r}" if tag
@@ -179,6 +184,33 @@ def main() -> int:
         if gap:
             missing.append(gap)
             continue
+
+        if path == "R":
+            # The ROI pass generated on a crop. map_roi_back.py is the exact
+            # inverse of the warp and lays only the masked figure back over the
+            # plate, so this variant differs from path A in subject resolution
+            # and in nothing else.
+            for c in pchunks:
+                roi_out = vace_output(c, tag)
+                pl = plate_path(c, profile)
+                if roi_out is None or not roi_out.exists() or pl is None \
+                        or not pl.exists():
+                    gap = (f"{name}: {c['chunk_id']} needs tag {tag!r} and plate "
+                           f"{profile!r}")
+                    break
+                part = out_dir / f"_{name}_{c['chunk_id']}.mkv"
+                r = run([str(P.venv_python), str(P.scripts / "map_roi_back.py"),
+                         "--shot", c["shot_id"], "--roi-output", str(roi_out),
+                         "--background", str(pl), "--out", str(part)],
+                        log, check=False)
+                if r.returncode != 0:
+                    gap = (f"{name}: ROI map-back failed "
+                           f"({(r.stderr or '').strip()[-200:]})")
+                    break
+                parts.append(part)
+            if gap:
+                missing.append(gap)
+                continue
 
         if path == "B":
             for c in pchunks:
