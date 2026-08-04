@@ -69,12 +69,26 @@ NOTES = {
         "Tracking review sheets. Does the red region cover the WHOLE figure - "
         "hair, hands, feet, bag - and nothing else? If it caught the wrong "
         "person, every subject judgement below is meaningless.",
+    "references/shot0000_reference_pack.png":
+        "THE image VACE is actually conditioned on for this shot. Three panels: "
+        "an identity view, the garment taken from this interval's own footage, "
+        "and an alternate head angle. The two external panels must show face, "
+        "hair and skin on flat grey - if you can see clothing in either of "
+        "them, the garment authority has leaked and everything below is void.",
+    "references/shot0000_pack.json":
+        "Provenance for that image: which photographs, why they were chosen, "
+        "their identity agreement, and the measured colour distance between "
+        "their clothes and this interval's. That distance is a diagnostic only.",
     "references/reference_sheet.png":
-        "The single image VACE is given as the identity reference. Is this your "
-        "subject, in useful views, with no other people and no wasted space?",
+        "The older GLOBAL sheet, kept only as a fallback for shots without a "
+        "pack. If a pack exists above, judge that instead - this one may "
+        "predate it.",
     "references/contact_sheet.png":
         "Every candidate reference, kept and rejected. Did anything good get "
         "dropped, or anything bad kept?",
+    "reports/pilot_findings.md":
+        "START HERE. What was measured, what it means, what is NOT concluded, "
+        "and one earlier claim corrected.",
     "reports/":
         "Measurements, not verdicts. pilot_metrics.json has the numbers behind "
         "the notes above; pipeline_estimates.md has runtime, VRAM and disk.",
@@ -144,6 +158,19 @@ def main() -> int:
             included.append((arc, sz))
 
         # ---- stills that need judging ----------------------------------------
+        # The PER-SHOT packs first. These are what actually conditions the
+        # generation, and the only artefact that shows whether the external
+        # clothing was really stripped. The global sheet below is a fallback and
+        # is often older than the pack, so shipping it alone invites the reviewer
+        # to check the wrong image.
+        pack_dir = P.intermediate / "reference_packs"
+        if pack_dir.exists():
+            for p in sorted(pack_dir.glob("*_reference_pack.png")):
+                zf.write(p, f"references/{p.name}")
+                included.append((f"references/{p.name}", p.stat().st_size))
+            for p in sorted(pack_dir.glob("*_pack.json")):
+                zf.write(p, f"references/{p.name}")
+                included.append((f"references/{p.name}", p.stat().st_size))
         for sheet in ("reference_sheet.png", "contact_sheet.png"):
             p = P.reference_sheets / sheet
             if p.exists():
@@ -156,9 +183,9 @@ def main() -> int:
                 included.append((f"masks/{p.name}", p.stat().st_size))
 
         # ---- reports ----------------------------------------------------------
-        for rp in ("pilot_metrics.json", "pipeline_estimates.md",
-                   "tracking_report.json", "background_runtime.json",
-                   "pilot_variants.json"):
+        for rp in ("pilot_findings.md", "pilot_metrics.json",
+                   "pipeline_estimates.md", "tracking_report.json",
+                   "background_runtime.json", "pilot_variants.json"):
             p = P.reports / rp
             if p.exists():
                 zf.write(p, f"reports/{rp}")
