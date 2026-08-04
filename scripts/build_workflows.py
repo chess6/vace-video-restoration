@@ -9,10 +9,14 @@ Node signatures (input names, order, widget vs link, combo options,
 control_after_generate) are read from the RUNNING ComfyUI's /object_info rather
 than hardcoded, so a generated workflow cannot drift from the installed revision.
 
-Graphs produced:
+Graphs produced. The mask and the reference sheet are independent switches, so
+each ablation changes exactly one variable against the baseline:
   vace_masked_depth_v2v_1p3b   the baseline: depth control + reference sheet +
                                tracked subject mask
-  vace_unmasked_compare        same, minus the mask and reference (ablation)
+  vace_masked_noref            baseline minus the reference sheet only
+                               (the controlled reference ablation)
+  vace_unmasked_ref            baseline minus the mask only
+  vace_unmasked_compare        neither mask nor reference
   smoke_test_modelload         minimal: loads all three models and generates a
                                few frames, to prove the stack works
 
@@ -250,13 +254,34 @@ def sampler_tail(g: Graph, cfg: dict, mdl: dict, vace: N, fps: int,
     return ks
 
 
-def graph_main(cfg: dict, masked: bool = True) -> Graph:
+# The mask and the reference sheet are INDEPENDENT switches. They used to be one,
+# which meant the "no reference" ablation silently also removed the mask and so
+# compared two things at once. Each combination gets its own graph and its own
+# name, so run_chunks.py can drop exactly one variable at a time.
+GRAPH_NAMES = {
+    (True, True): "vace_masked_depth_v2v_1p3b",   # the baseline
+    (True, False): "vace_masked_noref",           # controlled reference ablation
+    (False, True): "vace_unmasked_ref",           # controlled mask ablation
+    (False, False): "vace_unmasked_compare",      # neither: the loosest comparison
+}
+
+
+def graph_name(masked: bool, reference: bool, background: bool = False) -> str:
+    """`_bg` variants take their preserved pixels from the SeedVR2 plate instead
+    of the original. Only the masked graphs have a preserved region to speak of,
+    so only those get a background variant."""
+    name = GRAPH_NAMES[(bool(masked), bool(reference))]
+    return f"{name}_bg" if background and masked else name
+
+
+def graph_main(cfg: dict, masked: bool = True, reference: bool = True,
+               background: bool = False) -> Graph:
     v = cfg["video"]
-    name = ("vace_masked_depth_v2v_1p3b" if masked else "vace_unmasked_compare")
-    g = Graph(name,
-              "Depth-controlled VACE v2v with reference sheet and tracked subject mask"
-              if masked else
-              "Ablation: identical settings with NO mask and NO reference image")
+    what = ("tracked subject mask" if masked else "no mask",
+            "reference sheet" if reference else "no reference image")
+    g = Graph(graph_name(masked, reference, background),
+              f"Depth-controlled VACE v2v with {what[0]} and {what[1]}"
+              + (", preserving a SeedVR2-restored background" if background else ""))
     mdl = common_models(g, cfg)
 
     src_v = g.add(N("LoadVideo", "Source chunk (original 240p, upscaled+padded)",
@@ -264,6 +289,25 @@ def graph_main(cfg: dict, masked: bool = True) -> Graph:
     src = g.add(N("GetVideoComponents", "Source frames", video=src_v()))
     dep_v = g.add(N("LoadVideo", "Depth control", file="chunk_depth.mp4"))
     dep = g.add(N("GetVideoComponents", "Depth frames", video=dep_v()))
+
+    # The plate the preserved region is taken from. WanVaceToVideo computes
+    # inactive = control_video * (1 - mask), so whatever supplies control_video
+    # OUTSIDE the mask is what survives into the output untouched. Pointing that
+    # at the SeedVR2 restoration is the whole background integration: the model
+    # sees a restored environment as the thing it must keep, and regenerates only
+    # the masked figure. The depth, the mask and the chunk timing still come from
+    # the original stream, so nothing structural depends on the restoration.
+    if background:
+        bg_v = g.add(N("LoadVideo", "SeedVR2-restored background chunk",
+                       file="chunk_background.mp4"))
+        base = g.add(N("GetVideoComponents", "Background frames", video=bg_v()))
+    else:
+        base = src
+
+    vace_kw = dict(positive=mdl["pos"](), negative=mdl["neg"](), vae=mdl["vae"](),
+                   width=int(v["width"]), height=int(v["height"]),
+                   length=int(v["chunk_frames"]), batch_size=1,
+                   strength=float(cfg["sampling"]["vace_strength"]))
 
     if masked:
         msk_v = g.add(N("LoadVideo", "Tracked subject mask (white = regenerate)",
@@ -276,31 +320,148 @@ def graph_main(cfg: dict, masked: bool = True) -> Graph:
                            top=int(cfg["mask"]["feather"]),
                            right=int(cfg["mask"]["feather"]),
                            bottom=int(cfg["mask"]["feather"])))
-        # THE critical composite: original RGB outside the mask, depth inside it.
+        # THE critical composite: preserved-base RGB outside the mask, depth
+        # inside it. The base is the original, or the SeedVR2 plate when the
+        # background stage is in use.
         ctrl = g.add(N("ImageCompositeMasked",
-                       "Control = original outside mask, depth inside",
-                       destination=src(), source=dep(), x=0, y=0,
+                       "Control = base outside mask, depth inside",
+                       destination=base(), source=dep(), x=0, y=0,
                        resize_source=False, mask=mask()))
-        ref = g.add(N("LoadImage", "Reference sheet", image="reference_sheet.png"))
-        vace = g.add(N("WanVaceToVideo", "VACE conditioning",
-                       positive=mdl["pos"](), negative=mdl["neg"](), vae=mdl["vae"](),
-                       width=int(v["width"]), height=int(v["height"]),
-                       length=int(v["chunk_frames"]), batch_size=1,
-                       strength=float(cfg["sampling"]["vace_strength"]),
-                       control_video=ctrl(), control_masks=mask(),
-                       reference_image=ref(0)))
-        prefix = "vace/masked_ref"
+        vace_kw.update(control_video=ctrl(), control_masks=mask())
     else:
-        vace = g.add(N("WanVaceToVideo", "VACE conditioning (no mask, no reference)",
-                       positive=mdl["pos"](), negative=mdl["neg"](), vae=mdl["vae"](),
-                       width=int(v["width"]), height=int(v["height"]),
-                       length=int(v["chunk_frames"]), batch_size=1,
-                       strength=float(cfg["sampling"]["vace_strength"]),
-                       control_video=dep()))
-        prefix = "vace/unmasked_noref"
+        # No mask means no preserved region, so the whole frame is regenerated and
+        # the control video is depth everywhere.
+        vace_kw.update(control_video=dep())
 
+    if reference:
+        ref = g.add(N("LoadImage", "Reference sheet", image="reference_sheet.png"))
+        vace_kw.update(reference_image=ref(0))
+
+    vace = g.add(N("WanVaceToVideo", f"VACE conditioning ({what[0]}, {what[1]})",
+                   **vace_kw))
+    prefix = f"vace/{'masked' if masked else 'unmasked'}_{'ref' if reference else 'noref'}"
     sampler_tail(g, cfg, mdl, vace, v["model_fps"], prefix)
     return g
+
+
+def dynamic_options(spec: dict) -> dict[str, list]:
+    """Inputs of a node schema that are dynamic combos, mapped to their options.
+
+    Their nested inputs do not appear in the schema's own input list, so any
+    check that compares a prompt against `ordered_inputs` has to be told about
+    them or it will reject a perfectly valid graph.
+    """
+    out = {}
+    for section in ("required", "optional"):
+        for name, val in (spec.get("input", {}).get(section) or {}).items():
+            if isinstance(val, list) and val and val[0] == "COMFY_DYNAMICCOMBO_V3":
+                meta = val[1] if len(val) > 1 and isinstance(val[1], dict) else {}
+                out[name] = meta.get("options", [])
+    return out
+
+
+def graph_seedvr2(cfg: dict, profile: str) -> Graph:
+    """Full-frame background restoration with SeedVR2 3B.
+
+    Runs before VACE and independently of it. Its output is only ever used as the
+    plate the subject sits on: no scene cut, timestamp, mask, depth or tracking
+    decision is derived from it, so changing profile cannot move a chunk boundary
+    or shift the subject.
+
+    Node semantics are read from the installed revision,
+    ComfyUI/comfy_extras/nodes_seedvr.py:
+      * SeedVR2Preprocess pads to a multiple of 16 and to 4n+1 frames
+      * SeedVR2TemporalChunk emits a LIST of latents; ComfyUI then runs the
+        conditioning and the sampler once per chunk, which is what keeps peak
+        VRAM flat instead of scaling with clip length
+      * temporal_overlap is counted in LATENT frames and is clamped to
+        (frames_per_chunk-1)/4 by the node itself
+      * SeedVR2PostProcessing colour-matches the result back to the pre-upscale
+        frames, which is the main conservative/aggressive lever
+    """
+    b = cfg["background"]
+    p = b["profiles"][profile]
+    v = cfg["video"]
+    g = Graph(f"seedvr2_{profile}",
+              f"SeedVR2 3B ({b['weight_dtype']}) full-frame restoration - {profile}. "
+              f"{p['description'].strip()}")
+
+    unet = g.add(N("UNETLoader", "SeedVR2 3B",
+                   unet_name=b["model"], weight_dtype=b["weight_dtype"]))
+    vae = g.add(N("VAELoader", "SeedVR2 VAE", vae_name=b["vae"]))
+
+    src_v = g.add(N("LoadVideo", "Source chunk", file="bg_source.mp4"))
+    src = g.add(N("GetVideoComponents", "Source frames", video=src_v()))
+
+    # Restore at the configured short edge, then hand the SAME resized frames to
+    # post-processing as the colour reference.
+    tw, th = seedvr2_target_size(int(v["width"]), int(v["height"]),
+                                 int(b["target_short_edge"]))
+    resized = g.add(N("ImageScale", "Resize for SeedVR2", image=src(),
+                      upscale_method="lanczos", width=tw, height=th,
+                      crop="disabled"))
+    pre = g.add(N("SeedVR2Preprocess", "Pad to 16 / 4n+1", resized_images=resized()))
+
+    # Tiled on BOTH sides. The encode sees the whole clip at once, before
+    # SeedVR2TemporalChunk has had a chance to bound anything, so a plain
+    # VAEEncode is the one place where peak VRAM still scales with clip length -
+    # measured at 11.9 GiB of 12.3 GiB on only 21 frames.
+    enc = g.add(N("VAEEncodeTiled", "Encode (tiled)", pixels=pre(), vae=vae(),
+                  tile_size=int(b["vae_tile_size"]),
+                  overlap=int(b["vae_tile_overlap"]),
+                  temporal_size=int(b["frames_per_chunk"]) - 1,
+                  temporal_overlap=4))
+    # chunking_mode is a COMFY_DYNAMICCOMBO_V3: the prompt carries the selected
+    # option key under the input's own name, and each nested input of that option
+    # under "<parent>.<child>" (comfy_api/latest/_io.py::finalize_prefix). A dot
+    # is not a valid Python identifier, so the nested key is set after
+    # construction rather than as a keyword argument.
+    chunk_node = N("SeedVR2TemporalChunk", "Split into temporal chunks",
+                   latent=enc(), temporal_overlap=int(b["temporal_overlap"]),
+                   chunking_mode=b.get("chunking_mode", "manual"))
+    if chunk_node.inputs["chunking_mode"] == "manual":
+        chunk_node.inputs["chunking_mode.frames_per_chunk"] = int(b["frames_per_chunk"])
+    chunk = g.add(chunk_node)
+    cond = g.add(N("SeedVR2Conditioning", "Conditioning",
+                   model=unet(), vae_conditioning=chunk(0)))
+    ks = g.add(N("KSampler", "Sampler",
+                 model=unet(), seed=int(cfg["sampling"]["seed"]),
+                 steps=int(p["steps"]), cfg=float(p["cfg"]),
+                 sampler_name=cfg["sampling"]["sampler"],
+                 scheduler=cfg["sampling"]["scheduler"],
+                 positive=cond(0), negative=cond(1), latent_image=chunk(0),
+                 denoise=float(p["denoise"])))
+    merged = g.add(N("SeedVR2TemporalMerge", "Merge temporal chunks",
+                     latents=ks(), temporal_overlap=chunk(1)))
+    # Tiled decode: bounds the decode peak independently of frame size, which is
+    # what makes 720p restoration possible at all on a 12 GB card.
+    dec = g.add(N("VAEDecodeTiled", "Decode (tiled)", samples=merged(), vae=vae(),
+                  tile_size=int(b["vae_tile_size"]), overlap=int(b["vae_tile_overlap"]),
+                  temporal_size=int(b["frames_per_chunk"]) - 1,
+                  temporal_overlap=4))
+    post = g.add(N("SeedVR2PostProcessing", "Align + colour match",
+                   images=dec(), original_resized_images=resized(),
+                   color_correction_method=p["color_correction"]))
+    # Back to the working-stream geometry, so the plate is frame- and
+    # pixel-aligned with the depth, the mask and the original.
+    back = g.add(N("ImageScale", "Back to working geometry", image=post(),
+                   upscale_method="lanczos", width=int(v["width"]),
+                   height=int(v["height"]), crop="disabled"))
+    vid = g.add(N("CreateVideo", "Assemble frames", images=back(),
+                  fps=float(v["model_fps"])))
+    g.add(N("SaveVideo", "Save restored background", video=vid(),
+            filename_prefix=f"seedvr2/{profile}", format="auto", codec="auto"))
+    return g
+
+
+def seedvr2_target_size(w: int, h: int, short_edge: int) -> tuple[int, int]:
+    """Scale so the SHORT edge hits `short_edge`, keeping aspect, both axes even.
+
+    Never downscales: restoring below the working resolution would throw away
+    detail the rest of the pipeline still has.
+    """
+    scale = max(1.0, short_edge / float(min(w, h)))
+    return (int(round(w * scale / 2) * 2), int(round(h * scale / 2) * 2))
 
 
 def graph_smoke(cfg: dict) -> Graph:
@@ -349,9 +510,14 @@ def main() -> int:
     log.info("Read %d node schemas from the running ComfyUI", len(oi))
 
     P.workflows.mkdir(parents=True, exist_ok=True)
-    graphs = [graph_main(cfg, masked=True),
-              graph_main(cfg, masked=False),
-              graph_smoke(cfg)]
+    graphs = [graph_main(cfg, masked=m, reference=r) for m, r in GRAPH_NAMES]
+    # Background-preserving variants of the masked graphs, plus one SeedVR2
+    # restoration graph per background profile.
+    graphs += [graph_main(cfg, masked=True, reference=r, background=True)
+               for r in (True, False)]
+    if cfg.get("background", {}).get("enabled"):
+        graphs += [graph_seedvr2(cfg, p) for p in cfg["background"]["profiles"]]
+    graphs.append(graph_smoke(cfg))
 
     for g in graphs:
         api = to_api(g, oi)
@@ -365,6 +531,19 @@ def main() -> int:
         for nid, nd in api.items():
             spec = oi[nd["class_type"]]
             valid = {k for k, _ in ordered_inputs(spec)}
+            # A dynamic combo declares one input whose selected option carries
+            # nested inputs, and the prompt names those "<parent>.<child>"
+            # (comfy_api/latest/_io.py::finalize_prefix). They are legal inputs
+            # even though the schema lists only the parent, so expand the valid
+            # set with the nested names belonging to the option actually chosen.
+            for pname, pspec in dynamic_options(spec).items():
+                chosen = nd["inputs"].get(pname)
+                for opt in pspec:
+                    if opt.get("key") == chosen:
+                        for child in (opt.get("inputs", {}).get("required") or {}):
+                            valid.add(f"{pname}.{child}")
+                        for child in (opt.get("inputs", {}).get("optional") or {}):
+                            valid.add(f"{pname}.{child}")
             unknown = set(nd["inputs"]) - valid
             if unknown:
                 raise KeyError(f"{g.name}: node {nid} ({nd['class_type']}) has "

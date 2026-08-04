@@ -49,6 +49,71 @@ scene_detect:
   threshold: 27.0
   min_scene_len_frames: 16
 
+# ---------------------------------------------------------------------------
+# Background restoration (SeedVR2)
+# ---------------------------------------------------------------------------
+# A full-frame restoration pass that runs BEFORE VACE and produces the plate the
+# subject is composited onto. It restores the environment - walls, floor, props,
+# distant people, signage - which VACE is deliberately not asked to touch.
+#
+# Everything structural is still derived from the ORIGINAL normalized stream:
+# scene cuts, chunk timing, depth, masks and subject tracking never see SeedVR2
+# output. Only the *pixels VACE preserves* come from here. That keeps the
+# geometry the model follows identical between profiles, so a background profile
+# can be changed without re-running detection or tracking.
+#
+# Constraints read from the installed ComfyUI revision,
+# ComfyUI/comfy_extras/nodes_seedvr.py:
+#   * SeedVR2Preprocess pads to a multiple of 16 in both axes and to 4n+1 frames
+#   * SeedVR2TemporalChunk frames_per_chunk has step=4 (default 21)
+#   * SeedVR2PostProcessing colour-matches the result to the pre-upscale frames
+background:
+  enabled: true
+  # 3B in fp8 only. The 7B model will not fit this 12 GB card and is never
+  # selected locally; see configs/cloud_14b.yaml for the rented-hardware profile.
+  model: seedvr2_3b_fp8_e4m3fn.safetensors
+  vae: seedvr2_ema_vae_fp16.safetensors
+  weight_dtype: fp8_e4m3fn
+  # VRAM-safe temporal batching. SeedVR2 holds the whole clip in latent space, so
+  # an 81-frame chunk is split, sampled and merged with a crossfade rather than
+  # attempted in one pass.
+  chunking_mode: manual         # manual = reproducible; auto = size to free VRAM
+  frames_per_chunk: 21          # PIXEL frames, must be 4n+1 (checked by the node)
+  # LATENT frames shared between adjacent temporal chunks, crossfaded by
+  # SeedVR2TemporalMerge. One latent frame is four pixel frames, and the node
+  # clamps this to (frames_per_chunk-1)/4, so 1 is a 4-pixel-frame crossfade.
+  temporal_overlap: 1
+  # VAE tiling keeps the encode/decode peak bounded independently of frame size.
+  vae_tile_size: 512
+  vae_tile_overlap: 64
+  # The short edge SeedVR2 restores at. The result is resampled back to the
+  # working-stream geometry, so this does not change any downstream dimension.
+  target_short_edge: 720
+
+  profiles:
+    # Structural and temporal fidelity first. Fewer steps and a strong colour
+    # match to the original keep the environment recognisably the same place;
+    # the aim is a cleaner version of what is there, not a new scene.
+    background_conservative:
+      steps: 12
+      cfg: 1.0
+      denoise: 0.75
+      color_correction: lab      # most faithful of the installed methods
+      description: >-
+        Prioritises structural and temporal fidelity. Least likely to invent
+        detail, alter signage or mutate distant faces.
+
+    # More plausible environmental detail, accepting more invention. Use when the
+    # source is degraded enough that faithful restoration still looks broken.
+    background_aggressive:
+      steps: 25
+      cfg: 1.0
+      denoise: 1.0
+      color_correction: wavelet  # keeps generated high-frequency detail
+      description: >-
+        Reconstructs stronger plausible environmental detail. Expect more
+        invented texture, and check signage and distant faces before trusting it.
+
 control:
   # Structural control profile. Depth is the baseline because the goal is to keep
   # the whole figure's shape, volume and motion, not just facial landmarks.
@@ -76,6 +141,41 @@ sampling:
   denoise: 1.0
   # WanVaceToVideo "strength": how strongly the VACE control stream binds.
   vace_strength: 1.0
+
+# How the regenerated subject meets the restored background.
+#
+# Two integration paths exist, and scripts/make_comparisons.py measures both:
+#   in_vace   VACE preserves the SeedVR2 plate itself, because control_video
+#             outside the mask IS the background. One pass, no seam, but it
+#             trusts the model to leave the preserved region alone.
+#   composite The subject is cut from the VACE output and laid over the SeedVR2
+#             plate afterwards using the lossless mask. The background is then
+#             bit-exact, at the cost of a real edge to manage.
+#
+# The band is deliberately narrow: a wide ramp is what produces halos and the
+# pasted-on look around hair and clothing edges. Feathering happens exactly once
+# on each path - the workflow's FeatherMask for in_vace, this band for composite.
+composite:
+  # MEASURED on the pilot (reports/pilot_metrics.json, 81 frames at 720x544).
+  # `composite` wins on BOTH of the criteria that decide this:
+  #
+  #                        background held      edge halo
+  #                    within 2 levels / drift   (1.0 = as source)
+  #   in_vace   cons        0.648 / 1.67          1.22
+  #   composite cons        0.992 / 1.33          1.19
+  #   in_vace   aggr        0.626 / 1.79          1.45
+  #   composite aggr        0.992 / 1.31          1.23
+  #
+  # VACE re-encodes the whole frame through its VAE, so even the "preserved"
+  # region comes back changed: only ~63-65% of background pixels survive within
+  # two levels. Compositing keeps the plate verbatim (99.2%) AND has the tighter
+  # edge, because the narrow centred band bleeds ~2px rather than growing a rim.
+  # Re-measure before changing this: it is a measurement, not a preference.
+  path: composite               # in_vace | composite
+  band_px: 3                    # width of the alpha ramp across the subject edge
+  # Erode the hard mask by half the band before ramping, so the ramp straddles
+  # the true silhouette instead of eating into the subject.
+  center_band: true
 
 mask:
   # Feather radius in pixels applied to the tracked figure mask.

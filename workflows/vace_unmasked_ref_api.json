@@ -98,6 +98,15 @@
     }
   },
   "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "reference_sheet.png"
+    },
+    "_meta": {
+      "title": "Reference sheet"
+    }
+  },
+  "11": {
     "class_type": "WanVaceToVideo",
     "inputs": {
       "positive": [
@@ -120,13 +129,17 @@
       "control_video": [
         "9",
         0
+      ],
+      "reference_image": [
+        "10",
+        0
       ]
     },
     "_meta": {
-      "title": "VACE conditioning (no mask, no reference image)"
+      "title": "VACE conditioning (no mask, reference sheet)"
     }
   },
-  "11": {
+  "12": {
     "class_type": "KSampler",
     "inputs": {
       "model": [
@@ -139,15 +152,15 @@
       "sampler_name": "uni_pc",
       "scheduler": "simple",
       "positive": [
-        "10",
+        "11",
         0
       ],
       "negative": [
-        "10",
+        "11",
         1
       ],
       "latent_image": [
-        "10",
+        "11",
         2
       ],
       "denoise": 1.0
@@ -156,15 +169,15 @@
       "title": "Sampler"
     }
   },
-  "12": {
+  "13": {
     "class_type": "TrimVideoLatent",
     "inputs": {
       "samples": [
-        "11",
+        "12",
         0
       ],
       "trim_amount": [
-        "10",
+        "11",
         3
       ]
     },
@@ -172,11 +185,11 @@
       "title": "Drop reference frame"
     }
   },
-  "13": {
+  "14": {
     "class_type": "VAEDecode",
     "inputs": {
       "samples": [
-        "12",
+        "13",
         0
       ],
       "vae": [
@@ -188,11 +201,11 @@
       "title": "Decode"
     }
   },
-  "14": {
+  "15": {
     "class_type": "CreateVideo",
     "inputs": {
       "images": [
-        "13",
+        "14",
         0
       ],
       "fps": 16.0
@@ -201,14 +214,14 @@
       "title": "Assemble frames"
     }
   },
-  "15": {
+  "16": {
     "class_type": "SaveVideo",
     "inputs": {
       "video": [
-        "14",
+        "15",
         0
       ],
-      "filename_prefix": "vace/unmasked_noref",
+      "filename_prefix": "vace/unmasked_ref",
       "format": "auto",
       "codec": "auto"
     },

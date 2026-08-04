@@ -18,6 +18,25 @@ artefact is written to disk for you to open yourself.
 
 ## How it works
 
+Two models, each doing the job it is actually good at: **SeedVR2 3B** restores the
+whole frame, and **VACE 1.3B** replaces only the tracked main figure on top of
+that, using the reference sheet.
+
+```
+Original video
+├── scene cuts, timing, depth, masks and subject motion   <- ALWAYS from the original
+└── SeedVR2 full-frame restoration  (background_conservative | background_aggressive)
+      └── VACE replaces only the masked main figure using reference images
+            └── blend / composite   (in_vace | composite)
+                  └── exact-timeline assembly with the original audio
+```
+
+The rule that keeps this honest: **nothing structural is ever derived from
+SeedVR2 output.** Scene cuts, chunk timing, depth, masks and tracking all come
+from the original normalized stream. SeedVR2 supplies pixels and nothing else, so
+switching background profile - or turning the stage off - cannot move a chunk
+boundary, shift the tracked subject or change what the model is told to follow.
+
 ```
 inputs/source/your.mp4  (never modified)
         │
@@ -126,6 +145,10 @@ venv/bin/python scripts/extract_pilot.py --seconds 8
 venv/bin/python scripts/run_chunks.py --pilot
 
 # 9. controlled comparison: no-reference ablation + a second seed
+#    --no-reference drops ONLY the reference sheet and keeps the tracked mask,
+#    so the ablation changes exactly one variable against the baseline.
+#    Each variant is recorded separately in the manifest under runs.<tag>, so
+#    these neither skip as "already done" nor overwrite the baseline's output.
 venv/bin/python scripts/run_chunks.py --pilot --no-reference --tag noref
 venv/bin/python scripts/run_chunks.py --pilot --seed 987654 --tag seedB
 
@@ -151,7 +174,10 @@ scripts/run_full.sh --confirm-full-run   # actually starts
 
 | Task | Command |
 |---|---|
+| Recreate everything from a fresh clone | `scripts/bootstrap.sh` (`--check` to only report) |
 | Verify environment | `scripts/verify_env.sh` |
+| Chunking + assembly tests (no GPU) | `venv/bin/python scripts/test_chunking.py --with-video` |
+| Sample a short clip from each source | `venv/bin/python scripts/sample_clips.py --seconds 5` |
 | Start / stop / check ComfyUI | `scripts/start_comfyui.sh --daemon` / `--stop` / `--status` |
 | Re-download + checksum models | `scripts/download_models.sh` |
 | Install auxiliary models | `scripts/download_aux_models.sh` |
@@ -159,6 +185,13 @@ scripts/run_full.sh --confirm-full-run   # actually starts
 | Normalize + chunk | `venv/bin/python scripts/preprocess_source.py --auto-aspect` |
 | Prepare references | `venv/bin/python scripts/prepare_references.py` |
 | Generate depth | `venv/bin/python scripts/make_depth.py` |
+| Download SeedVR2 3B (fp8) | `scripts/download_seedvr2.sh` |
+| Restore backgrounds | `venv/bin/python scripts/restore_background.py --all-profiles --pilot` |
+| VACE over a restored plate | `venv/bin/python scripts/run_chunks.py --pilot --background background_conservative` |
+| Composite subject onto a plate | `venv/bin/python scripts/composite_subject.py --chunk <id> --subject <mp4> --background <mkv> --out <mkv>` |
+| Build the 8-way pilot comparison | `venv/bin/python scripts/pilot_compare.py` |
+| Measure the variants | `venv/bin/python scripts/evaluate_pilot.py` |
+| **Zip everything needing review** | `venv/bin/python scripts/make_review_bundle.py` |
 | Track the subject | `venv/bin/python scripts/track_subject.py` |
 | Re-seed one shot | `venv/bin/python scripts/track_subject.py --shot shot0003 --init-box x0,y0,x1,y1 --force` |
 | Prove mask polarity | `venv/bin/python scripts/verify_mask_polarity.py` |

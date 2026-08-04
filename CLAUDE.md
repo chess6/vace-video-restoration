@@ -25,6 +25,13 @@ it asks for a preview.
 **Required instead:** write every visual artefact to disk as a file and print its
 path. The user opens it themselves, if and when they choose.
 
+**And collect them.** Whenever work reaches a point that needs the user's eyes —
+a pilot, a comparison, a re-tracked shot — run
+`scripts/make_review_bundle.py` and hand over the single zip it prints. Scattering
+artefacts across `outputs/`, `intermediate/masks/review/` and `reports/` and
+expecting the user to hunt for them is a failure of this rule, not a satisfaction
+of it. The bundle carries a README saying what each file is and what to look for.
+
 Concretely, in this project:
 - `scripts/start_comfyui.sh` always passes `--disable-auto-launch`.
 - `matplotlib`, where used, must stay on the non-interactive `Agg` backend.

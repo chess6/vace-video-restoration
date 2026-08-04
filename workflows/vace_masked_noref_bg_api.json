@@ -98,6 +98,100 @@
     }
   },
   "10": {
+    "class_type": "LoadVideo",
+    "inputs": {
+      "file": "chunk_background.mp4"
+    },
+    "_meta": {
+      "title": "SeedVR2-restored background chunk"
+    }
+  },
+  "11": {
+    "class_type": "GetVideoComponents",
+    "inputs": {
+      "video": [
+        "10",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Background frames"
+    }
+  },
+  "12": {
+    "class_type": "LoadVideo",
+    "inputs": {
+      "file": "chunk_mask.mp4"
+    },
+    "_meta": {
+      "title": "Tracked subject mask (white = regenerate)"
+    }
+  },
+  "13": {
+    "class_type": "GetVideoComponents",
+    "inputs": {
+      "video": [
+        "12",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Mask frames"
+    }
+  },
+  "14": {
+    "class_type": "ImageToMask",
+    "inputs": {
+      "image": [
+        "13",
+        0
+      ],
+      "channel": "red"
+    },
+    "_meta": {
+      "title": "Mask -> MASK"
+    }
+  },
+  "15": {
+    "class_type": "FeatherMask",
+    "inputs": {
+      "mask": [
+        "14",
+        0
+      ],
+      "left": 6,
+      "top": 6,
+      "right": 6,
+      "bottom": 6
+    },
+    "_meta": {
+      "title": "Soften mask edge"
+    }
+  },
+  "16": {
+    "class_type": "ImageCompositeMasked",
+    "inputs": {
+      "destination": [
+        "11",
+        0
+      ],
+      "source": [
+        "9",
+        0
+      ],
+      "x": 0,
+      "y": 0,
+      "resize_source": false,
+      "mask": [
+        "15",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Control = base outside mask, depth inside"
+    }
+  },
+  "17": {
     "class_type": "WanVaceToVideo",
     "inputs": {
       "positive": [
@@ -118,15 +212,19 @@
       "batch_size": 1,
       "strength": 1.0,
       "control_video": [
-        "9",
+        "16",
+        0
+      ],
+      "control_masks": [
+        "15",
         0
       ]
     },
     "_meta": {
-      "title": "VACE conditioning (no mask, no reference image)"
+      "title": "VACE conditioning (tracked subject mask, no reference image)"
     }
   },
-  "11": {
+  "18": {
     "class_type": "KSampler",
     "inputs": {
       "model": [
@@ -139,15 +237,15 @@
       "sampler_name": "uni_pc",
       "scheduler": "simple",
       "positive": [
-        "10",
+        "17",
         0
       ],
       "negative": [
-        "10",
+        "17",
         1
       ],
       "latent_image": [
-        "10",
+        "17",
         2
       ],
       "denoise": 1.0
@@ -156,15 +254,15 @@
       "title": "Sampler"
     }
   },
-  "12": {
+  "19": {
     "class_type": "TrimVideoLatent",
     "inputs": {
       "samples": [
-        "11",
+        "18",
         0
       ],
       "trim_amount": [
-        "10",
+        "17",
         3
       ]
     },
@@ -172,11 +270,11 @@
       "title": "Drop reference frame"
     }
   },
-  "13": {
+  "20": {
     "class_type": "VAEDecode",
     "inputs": {
       "samples": [
-        "12",
+        "19",
         0
       ],
       "vae": [
@@ -188,11 +286,11 @@
       "title": "Decode"
     }
   },
-  "14": {
+  "21": {
     "class_type": "CreateVideo",
     "inputs": {
       "images": [
-        "13",
+        "20",
         0
       ],
       "fps": 16.0
@@ -201,14 +299,14 @@
       "title": "Assemble frames"
     }
   },
-  "15": {
+  "22": {
     "class_type": "SaveVideo",
     "inputs": {
       "video": [
-        "14",
+        "21",
         0
       ],
-      "filename_prefix": "vace/unmasked_noref",
+      "filename_prefix": "vace/masked_noref",
       "format": "auto",
       "codec": "auto"
     },

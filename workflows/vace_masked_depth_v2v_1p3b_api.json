@@ -167,7 +167,7 @@
       ]
     },
     "_meta": {
-      "title": "Control = original outside mask, depth inside"
+      "title": "Control = base outside mask, depth inside"
     }
   },
   "15": {
@@ -213,7 +213,7 @@
       ]
     },
     "_meta": {
-      "title": "VACE conditioning"
+      "title": "VACE conditioning (tracked subject mask, reference sheet)"
     }
   },
   "17": {

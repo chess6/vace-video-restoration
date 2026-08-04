@@ -26,14 +26,32 @@
 
 ## Variants generated
 
-| # | Variant | Command | Output |
-|---|---|---|---|
-| 1 | depth + reference + subject mask | `run_chunks.py --pilot` | `outputs/restored_480p/<chunk>.mp4` |
-| 2 | no reference conditioning (ablation) | `run_chunks.py --pilot --no-reference --tag noref` | `…_noref.mp4` |
-| 3 | reference-conditioned, second seed | `run_chunks.py --pilot --seed 987654 --tag seedB` | `…_seedB.mp4` |
+### A. Reference / seed ablations (subject only)
 
-Comparison artefacts: `outputs/comparisons/<chunk>_side_by_side.mp4`,
-`outputs/comparisons/<chunk>_frame_grid.png`.
+| # | Variant | Command |
+|---|---|---|
+| 1 | depth + reference + subject mask | `run_chunks.py --pilot` |
+| 2 | no reference conditioning | `run_chunks.py --pilot --no-reference --tag noref` |
+| 3 | reference-conditioned, second seed | `run_chunks.py --pilot --seed 987654 --tag seedB` |
+
+### B. Background restoration comparison
+
+All eight share one interval, mask, depth, reference sheet, prompt and VACE seed.
+Built by `scripts/run_pilot_comparison.sh`, measured by `scripts/evaluate_pilot.py`.
+
+| # | Variant | What it isolates |
+|---|---|---|
+| 1 | `lanczos_original` | the baseline everything must beat |
+| 2 | `seedvr2_conservative` | background restoration alone, fidelity-first |
+| 3 | `seedvr2_aggressive` | background restoration alone, detail-first |
+| 4 | `vace_over_original` | subject replacement with no background stage |
+| 5 | `vace_pathA_conservative` | VACE preserves the conservative plate itself |
+| 5b | `vace_pathB_conservative` | same subject composited onto that plate |
+| 6 | `vace_pathA_aggressive` | VACE preserves the aggressive plate itself |
+| 6b | `vace_pathB_aggressive` | same subject composited onto that plate |
+
+Artefacts: `outputs/comparisons/*.mkv`, `outputs/comparisons/pilot_grid.mp4`,
+metrics in `reports/pilot_metrics.json`, costs in `reports/pipeline_estimates.md`.
 
 ---
 
@@ -56,6 +74,39 @@ the side-by-side, not by reading logs.
 | **Duplicated limbs / fingers** | | |
 | **Invented detail** — plausible but wrong texture or objects | | |
 | **Duration and audio sync** | | |
+
+### Background-specific criteria (variants 2-6)
+
+Score per variant. `evaluate_pilot.py` gives a measured number for several of
+these; the score is still yours, because a metric cannot tell you whether an
+invented shop sign matters.
+
+| Criterion | 2 | 3 | 4 | 5 | 5b | 6 | 6b | Measured by |
+|---|---|---|---|---|---|---|---|---|
+| Temporal stability (no crawl/flicker) | | | | | | | | `temporal_stability` |
+| Subject identity preserved | | | | | | | | — |
+| Face fidelity | | | | | | | | — |
+| Body / clothing fidelity | | | | | | | | — |
+| Subject vs background sharpness balance | | | | | | | | `sharpness_balance` |
+| Environmental improvement over baseline | | | | | | | | `detail_gain` |
+| Hallucinated detail | | | | | | | | `hf_invention` |
+| Text / signage altered | | | | | | | | `hf_invention` (localised) |
+| Distant-face mutation | | | | | | | | — |
+| Edge halo around the figure | | | | | | | | `edge_halo` |
+| Background drift from the plate | | | | | | | | `bg_drift_vs_plate`, `bg_preserved_exact` |
+| Chunk-boundary consistency | | | | | | | | `temporal_stability` at seams |
+
+### The integration decision
+
+`bg_preserved_exact` is the direct test: the fraction of background pixels that
+survive VACE untouched. Path B is 1.0 by construction. If Path A is close to it
+and has no worse an edge, prefer Path A - one pass, no seam to manage. If Path A
+drifts, prefer Path B and accept the edge, which the narrow centred band keeps to
+about two pixels.
+
+- [ ] Path A `bg_preserved_exact` = ______   Path A `edge_halo` = ______
+- [ ] Path B `edge_halo` = ______
+- [ ] **Retained path: ____________** because ____________
 
 ### Specific questions to answer
 
