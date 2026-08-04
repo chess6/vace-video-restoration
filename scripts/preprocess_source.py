@@ -27,8 +27,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     P, VIDEO_EXTS, Chunk, Shot, ffprobe_json, find_single, human_size, human_time,
-    load_config, nearest_valid_length, parse_fraction, require_tools, round_to_16,
-    run, save_manifest, setup_logging,
+    load_config, nearest_valid_length, parse_fraction, rel, require_tools,
+    round_to_16, run, save_manifest, setup_logging,
 )
 
 
@@ -60,17 +60,19 @@ def suggest_target(src_w: int, src_h: int, sar: float, tgt_w: int, tgt_h: int) -
 
 
 def build_shots(cut_frames: list[int], total: int, min_len: int) -> list[Shot]:
-    bounds = [0] + [c for c in cut_frames if 0 < c < total] + [total]
-    bounds = sorted(set(bounds))
+    """One shot per detected cut interval. Shots are NEVER merged across a cut.
+
+    A short interval used to be merged into the preceding shot, which produced a
+    shot spanning the cut and, from there, chunks spanning it too - the one thing
+    the chunking is supposed to guarantee never happens. A short interval is now
+    kept as its own shot: `chunk_shot` gives it the longest legal window that
+    fits, and anything below the 5-frame minimum simply yields no window and is
+    passed through unrestored at assembly. `min_len` therefore only labels a shot
+    as short; it never changes a boundary.
+    """
+    bounds = sorted(set([0] + [c for c in cut_frames if 0 < c < total] + [total]))
     shots: list[Shot] = []
-    for i in range(len(bounds) - 1):
-        s, e = bounds[i], bounds[i + 1]
-        if e - s < min_len and shots:
-            # too short to stand alone: merge into the previous shot rather than
-            # emitting a chunk that cannot fill one VACE window
-            shots[-1].end_frame = e
-            shots[-1].n_frames = e - shots[-1].start_frame
-            continue
+    for s, e in zip(bounds, bounds[1:]):
         shots.append(Shot(shot_id=f"shot{len(shots):04d}", start_frame=s, end_frame=e,
                           src_start_sec=0.0, src_end_sec=0.0, n_frames=e - s))
     return shots
@@ -269,11 +271,15 @@ def main() -> int:
                 seed=int(cfg["sampling"]["seed"]),
                 prompt=cfg["prompt"]["positive"].strip(),
                 negative_prompt=cfg["prompt"]["negative"].strip(),
-                reference_sheet="intermediate/reference_sheets/reference_sheet.png",
-                depth_path=f"intermediate/depth/{cid}_depth.mp4",
-                mask_path=f"intermediate/masks/{cid}_mask.mp4",
-                control_path=f"intermediate/chunks/{cid}_control.mp4",
-                output_path=f"outputs/restored_480p/{cid}.mkv",
+                # Derived from P, not hard-coded: under VACE_RUN these live in
+                # runs/<name>/. Consumers resolve them as P.root / <path>, so a
+                # literal "intermediate/..." would send every later stage back to
+                # the unnamespaced tree.
+                reference_sheet=rel(P.reference_sheets / "reference_sheet.png"),
+                depth_path=rel(P.depth / f"{cid}_depth.mp4"),
+                mask_path=rel(P.masks / f"{cid}_mask.mp4"),
+                control_path=rel(P.chunks / f"{cid}_control.mp4"),
+                output_path=rel(P.restored_480p / f"{cid}.mkv"),
             ))
 
     bad = [c for c in chunks if (c.n_frames - 1) % 4 != 0]

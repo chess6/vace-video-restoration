@@ -27,12 +27,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
-    P, human_time, load_config, load_manifest, probe_dims_fps, probe_frames,
-    require_cuda, require_tools, run, save_manifest, setup_logging, slice_frames,
-    vram_snapshot,
+    P, check_geometry, geometry_key, human_time, load_config, load_manifest,
+    probe_dims_fps, probe_frames, require_cuda, require_tools, run, save_manifest,
+    setup_logging, slice_frames, vram_snapshot,
 )
 
 MODEL_ID = "depth-anything/Depth-Anything-V2-Large-hf"
+# Exact revision, so the control signal cannot change under the same code.
+MODEL_REV = "7581137eff8d4e94f6e796d3baea0e9fa79b22d2"
 
 
 def build_full_canny(work: Path, out: Path, width: int, height: int, fps: int,
@@ -71,8 +73,64 @@ def build_full_canny(work: Path, out: Path, width: int, height: int, fps: int,
     log.info("Canny edge pass: %d frames", written)
 
 
+def calibrate_ranges(work: Path, shots: list[tuple[int, int]], infer, total_frames: int,
+                     samples: int, log) -> tuple[np.ndarray, np.ndarray]:
+    """Fixed normalisation range per shot, as a (lo, hi) value for every frame.
+
+    Depth Anything returns relative inverse depth on an arbitrary scale, so the
+    raw value for one physical distance drifts from frame to frame. Normalising
+    each frame by its own min/max therefore re-maps the same physical depth to a
+    different grey level whenever anything enters or leaves the frame, and that
+    flicker goes straight into the control signal the sampler follows.
+
+    A range fixed per shot removes that: within a shot the mapping is constant,
+    so equal depths stay equally bright. It is calibrated per shot rather than
+    over the whole video because a cut can change the depth range completely,
+    and robust percentiles rather than min/max so one speck cannot set the scale.
+    """
+    import cv2
+    lo_pf = np.zeros(total_frames, dtype=np.float32)
+    hi_pf = np.ones(total_frames, dtype=np.float32)
+
+    wanted: dict[int, int] = {}          # frame index -> shot index
+    for si, (a, b) in enumerate(shots):
+        n = min(samples, b - a)
+        for f in np.linspace(a, b - 1, n):
+            wanted[int(round(f))] = si
+
+    cap = cv2.VideoCapture(str(work))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open working stream {work}")
+    per_shot: dict[int, list[np.ndarray]] = {}
+    idx = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if idx in wanted:
+            d = infer([cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)])[0]
+            per_shot.setdefault(wanted[idx], []).append(d)
+        idx += 1
+    cap.release()
+
+    for si, (a, b) in enumerate(shots):
+        ds = per_shot.get(si)
+        if not ds:
+            continue
+        allv = np.concatenate([d.ravel() for d in ds])
+        lo, hi = np.percentile(allv, 1.0), np.percentile(allv, 99.0)
+        if hi - lo < 1e-6:
+            lo, hi = float(allv.min()), float(allv.max()) or (lo + 1.0)
+        lo_pf[a:b], hi_pf[a:b] = lo, hi
+        log.info("depth range for frames %d-%d: [%.3f, %.3f] from %d sample(s)",
+                 a, b, lo, hi, len(ds))
+    return lo_pf, hi_pf
+
+
 def build_full_depth(work: Path, out: Path, width: int, height: int, fps: int,
-                     total_frames: int, batch: int, log) -> None:
+                     total_frames: int, batch: int, log,
+                     shots: list[tuple[int, int]] | None = None,
+                     calib_samples: int = 24) -> None:
     """Single sequential pass. Writes a grayscale-in-RGB depth video."""
     import cv2
     import torch
@@ -80,9 +138,24 @@ def build_full_depth(work: Path, out: Path, width: int, height: int, fps: int,
 
     dev = require_cuda(log)
     log.info("Loading %s", MODEL_ID)
-    proc = AutoImageProcessor.from_pretrained(MODEL_ID)
+    proc = AutoImageProcessor.from_pretrained(MODEL_ID, revision=MODEL_REV)
     model = AutoModelForDepthEstimation.from_pretrained(
-        MODEL_ID, dtype=torch.float16).to(dev).eval()
+        MODEL_ID, revision=MODEL_REV, dtype=torch.float16).to(dev).eval()
+
+    def infer(frames: list[np.ndarray]) -> np.ndarray:
+        with torch.inference_mode():
+            inputs = proc(images=frames, return_tensors="pt").to(dev)
+            pred = model(**inputs).predicted_depth
+            pred = torch.nn.functional.interpolate(
+                pred.unsqueeze(1).float(), size=(height, width),
+                mode="bicubic", align_corners=False).squeeze(1)
+        return pred.cpu().numpy()
+
+    shots = shots or [(0, total_frames)]
+    log.info("Calibrating a fixed depth range per shot (%d shot(s), <=%d samples "
+             "each) so equal depths keep equal brightness", len(shots), calib_samples)
+    lo_pf, hi_pf = calibrate_ranges(work, shots, infer, total_frames,
+                                    calib_samples, log)
 
     cap = cv2.VideoCapture(str(work))
     if not cap.isOpened():
@@ -106,19 +179,14 @@ def build_full_depth(work: Path, out: Path, width: int, height: int, fps: int,
         nonlocal written
         if not frames:
             return
-        with torch.inference_mode():
-            inputs = proc(images=frames, return_tensors="pt").to(dev)
-            pred = model(**inputs).predicted_depth      # (B, h, w)
-            pred = torch.nn.functional.interpolate(
-                pred.unsqueeze(1).float(), size=(height, width),
-                mode="bicubic", align_corners=False).squeeze(1)
-        d = pred.cpu().numpy()
-        for m in d:
-            # Per-frame min/max normalisation. This is the convention the VACE /
-            # ControlNet depth conditioning expects: near = bright, far = dark.
-            lo, hi = float(m.min()), float(m.max())
-            g = np.zeros_like(m, dtype=np.uint8) if hi - lo < 1e-6 else \
-                ((m - lo) / (hi - lo) * 255.0).astype(np.uint8)
+        for m in infer(frames):
+            # Near = bright, far = dark, as the VACE / ControlNet depth
+            # conditioning expects. The range is the SHOT's, fixed by
+            # calibrate_ranges, not this frame's own min/max: a per-frame range
+            # would make the same physical depth flicker between frames.
+            lo, hi = float(lo_pf[written]), float(hi_pf[written])
+            g = (np.zeros_like(m, dtype=np.uint8) if hi - lo < 1e-6 else
+                 (np.clip((m - lo) / (hi - lo), 0.0, 1.0) * 255.0).astype(np.uint8))
             ff.stdin.write(np.repeat(g[:, :, None], 3, axis=2).tobytes())
             written += 1
 
@@ -162,6 +230,8 @@ def main() -> int:
                          "'canny' is a cheap edge alternative kept for comparison. "
                          "Pose control would need a DWPose/OpenPose model, which "
                          "is deliberately not installed.")
+    ap.add_argument("--calib-samples", type=int, default=24,
+                    help="Frames sampled per shot to fix that shot's depth range")
     ap.add_argument("--canny-low", type=int, default=80)
     ap.add_argument("--canny-high", type=int, default=160)
     ap.add_argument("--force", action="store_true")
@@ -186,11 +256,27 @@ def main() -> int:
     P.depth.mkdir(parents=True, exist_ok=True)
     full = P.depth / ("full_depth.mkv" if args.mode == "depth" else "full_canny.mkv")
 
+    # Refuse to reuse depth built for a different geometry or control profile.
+    # Two separate keys: the plain geometry one every stage shares, and a
+    # depth-specific one that also covers the control profile, so switching
+    # depth -> canny invalidates the depth videos without invalidating anything
+    # else in the run.
+    if not args.force:
+        check_geometry(man, log, stage="make_depth")
+        check_geometry(man, log, extra={"control": args.mode}, stage="make_depth",
+                       key_name="depth_key")
+    else:
+        man["geometry_key"] = geometry_key(man)
+        man["depth_key"] = geometry_key(man, {"control": args.mode})
+
     if args.force or not full.exists() or probe_frames(full) != total:
         log.info("Building full-length %s control (%d frames @ %dx%d)",
                  args.mode, total, width, height)
         if args.mode == "depth":
-            build_full_depth(work, full, width, height, fps, total, args.batch, log)
+            shot_ranges = [(int(s["start_frame"]), int(s["end_frame"]))
+                           for s in man.get("shots", [])] or [(0, total)]
+            build_full_depth(work, full, width, height, fps, total, args.batch, log,
+                             shots=shot_ranges, calib_samples=args.calib_samples)
         else:
             build_full_canny(work, full, width, height, fps, total,
                              args.canny_low, args.canny_high, log)

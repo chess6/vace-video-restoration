@@ -55,6 +55,10 @@ needs = [s['shot_id'] for s in man['shots'] if s.get('subject_status') == 'needs
 if needs:
     print(f"  !! {len(needs)} shot(s) still flagged needs_user: {', '.join(needs[:8])}"
           + (" ..." if len(needs) > 8 else ""))
+absent = [s['shot_id'] for s in man['shots'] if s.get('subject_status') == 'subject_absent']
+if absent:
+    print(f"  {len(absent)} shot(s) have no subject and pass through unrestored "
+          f"(intentional): {', '.join(absent[:8])}" + (" ..." if len(absent) > 8 else ""))
 
 if os.path.exists(sys.argv[2]):
     b = json.load(open(sys.argv[2]))

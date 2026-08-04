@@ -71,6 +71,11 @@ outputs/*
 logs/*
 !logs/.gitkeep
 
+# Per-source run namespaces (VACE_RUN=<name>). Same content as the four
+# directories above - intermediate, outputs, reports and logs for one source
+# video - so it is denied on the same grounds, including the derived reports.
+runs/
+
 # ---- Caches ------------------------------------------------------------------
 .cache/
 hf_cache/

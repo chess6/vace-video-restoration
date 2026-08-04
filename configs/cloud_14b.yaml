@@ -33,10 +33,16 @@ download:
     - split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
     - split_files/vae/wan_2.1_vae.safetensors
   note: >-
-    A bf16/fp8 14B variant may be preferable depending on the rented GPU.
-    On a 48 GB card (A6000/L40S) fp16 is comfortable at 1280x720x81.
-    On a 24 GB card (4090/A10G) use the fp8_scaled 14B variant or reduce
-    chunk_frames to 61.
+    UNVERIFIED, BENCHMARK BEFORE COMMITTING TO A RENTAL. Nothing in this profile
+    has been run: the 14B weights are not downloaded here and do not fit this
+    GPU. The fp16 14B diffusion checkpoint alone is ~34.7 GB before activations,
+    the text encoder, the VAE and a 1280x720x81 latent, so a single 48 GB card is
+    plausible but not demonstrated - and the official VACE example presents
+    14B/720p on eight GPUs. Treat one-GPU fp16 as the thing to test first, with
+    the fp8_scaled 14B variant and a smaller chunk_frames as the fallbacks.
+    On a 24 GB card (4090/A10G) the fp8_scaled variant and chunk_frames 61 are
+    the starting point. Measure with scripts/benchmark.py on the rented box
+    before planning around any of these numbers.
 
 video:
   model_fps: 16

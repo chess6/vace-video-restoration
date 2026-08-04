@@ -11,6 +11,7 @@ Design rules enforced here:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -31,11 +32,31 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
+# Run namespace
+# ---------------------------------------------------------------------------
+# Every working path below is derived from RUN_ROOT rather than PROJECT_ROOT, so
+# that more than one source video can be processed without one run's manifest,
+# shots, depth, masks and outputs overwriting another's. Those artefacts all use
+# fixed names (`chunk_manifest.json`, `shot0000_mask.mkv`, ...) which are unique
+# only within a single source.
+#
+# Unset  -> the historical layout: intermediate/, outputs/, reports/, logs/ at
+#           the project root. Every existing command keeps working unchanged.
+# Set    -> runs/<name>/{intermediate,outputs,reports,logs}/
+#
+# inputs/, configs/, workflows/, scripts/ and the models are shared by every run
+# and are never namespaced. `runs/` is gitignored, like the paths it replaces.
+RUN_NAME = os.environ.get("VACE_RUN", "").strip()
+RUN_ROOT = (PROJECT_ROOT / "runs" / RUN_NAME) if RUN_NAME else PROJECT_ROOT
+
+# ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
 class P:
     root = PROJECT_ROOT
+    run_name = RUN_NAME
+    run_root = RUN_ROOT
     comfy = PROJECT_ROOT / "ComfyUI"
     venv_python = PROJECT_ROOT / "venv" / "bin" / "python"
     configs = PROJECT_ROOT / "configs"
@@ -43,23 +64,23 @@ class P:
     source = PROJECT_ROOT / "inputs" / "source"
     references = PROJECT_ROOT / "inputs" / "references"
     subject_seeds = PROJECT_ROOT / "inputs" / "subject_seeds"
-    intermediate = PROJECT_ROOT / "intermediate"
-    normalized = PROJECT_ROOT / "intermediate" / "normalized"
-    shots = PROJECT_ROOT / "intermediate" / "shots"
-    chunks = PROJECT_ROOT / "intermediate" / "chunks"
-    depth = PROJECT_ROOT / "intermediate" / "depth"
-    masks = PROJECT_ROOT / "intermediate" / "masks"
-    reference_sheets = PROJECT_ROOT / "intermediate" / "reference_sheets"
+    intermediate = RUN_ROOT / "intermediate"
+    normalized = RUN_ROOT / "intermediate" / "normalized"
+    shots = RUN_ROOT / "intermediate" / "shots"
+    chunks = RUN_ROOT / "intermediate" / "chunks"
+    depth = RUN_ROOT / "intermediate" / "depth"
+    masks = RUN_ROOT / "intermediate" / "masks"
+    reference_sheets = RUN_ROOT / "intermediate" / "reference_sheets"
     workflows = PROJECT_ROOT / "workflows"
     scripts = PROJECT_ROOT / "scripts"
-    outputs = PROJECT_ROOT / "outputs"
-    pilots = PROJECT_ROOT / "outputs" / "pilots"
-    comparisons = PROJECT_ROOT / "outputs" / "comparisons"
-    restored_480p = PROJECT_ROOT / "outputs" / "restored_480p"
-    final = PROJECT_ROOT / "outputs" / "final"
-    logs = PROJECT_ROOT / "logs"
-    reports = PROJECT_ROOT / "reports"
-    manifest = PROJECT_ROOT / "intermediate" / "chunk_manifest.json"
+    outputs = RUN_ROOT / "outputs"
+    pilots = RUN_ROOT / "outputs" / "pilots"
+    comparisons = RUN_ROOT / "outputs" / "comparisons"
+    restored_480p = RUN_ROOT / "outputs" / "restored_480p"
+    final = RUN_ROOT / "outputs" / "final"
+    logs = RUN_ROOT / "logs"
+    reports = RUN_ROOT / "reports"
+    manifest = RUN_ROOT / "intermediate" / "chunk_manifest.json"
     models = PROJECT_ROOT / "ComfyUI" / "models"
     comfy_input = PROJECT_ROOT / "ComfyUI" / "input"
     comfy_output = PROJECT_ROOT / "ComfyUI" / "output"
@@ -73,9 +94,70 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 # Logging
 # ---------------------------------------------------------------------------
 
+def geometry_key(manifest_or_norm: dict, extra: dict | None = None) -> str:
+    """Short hash of everything a reusable control stream depends on.
+
+    Depth videos, masks and source chunk slices are reused when they already
+    exist with the right frame count. Frame count alone does not distinguish a
+    480p control from a 720p one, nor a depth profile from a canny one, so
+    switching `configs/cloud_14b.yaml` in would silently reuse the 480p assets.
+    Stamping this key into the manifest makes a mismatch detectable.
+    """
+    n = manifest_or_norm.get("normalized", manifest_or_norm)
+    payload = {"width": n.get("width"), "height": n.get("height"),
+               "fps": n.get("fps"), "total_frames": n.get("total_frames"),
+               **(extra or {})}
+    blob = json.dumps(payload, sort_keys=True).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def check_geometry(man: dict, logger: logging.Logger, extra: dict | None = None,
+                   stage: str = "control", key_name: str = "geometry_key") -> str:
+    """Compare a recorded key with the one the current config implies.
+
+    Each stage checks its OWN key. `geometry_key` covers geometry alone and is
+    what every stage can agree on; a stage that also depends on something else -
+    make_depth on the control profile, say - passes that in `extra` and records
+    it under its own `key_name`. Sharing one key across stages with different
+    `extra` would make the comparison fail for two runs that are in fact
+    compatible, which is worse than not checking at all.
+
+    Raises when reusable assets on disk were built for different settings, so a
+    480p -> 720p switch fails loudly instead of feeding stale controls to a run
+    that would take days.
+    """
+    key = geometry_key(man, extra)
+    recorded = man.get(key_name)
+    if recorded and recorded != key:
+        raise RuntimeError(
+            f"{stage}: the intermediate assets in this run were built for "
+            f"{key_name}={recorded}, but the current config gives {key}. They "
+            f"cannot be reused. Re-run preprocess_source.py (optionally under a "
+            f"different VACE_RUN), or pass --force to rebuild them.")
+    if not recorded:
+        man[key_name] = key
+    return key
+
+
+def rel(path: Path) -> str:
+    """Path as stored in the manifest: relative to the PROJECT root, never the
+    run root. Consumers resolve it back with `P.root / value`, so this is what
+    keeps a namespaced run pointing inside runs/<name>/."""
+    return str(Path(path).relative_to(P.root))
+
+
+def ensure_run_dirs() -> None:
+    """Create the run-scoped tree. A no-op in the default layout, where these
+    directories are already present with their .gitkeep placeholders."""
+    for d in (P.intermediate, P.normalized, P.shots, P.chunks, P.depth, P.masks,
+              P.reference_sheets, P.outputs, P.pilots, P.comparisons,
+              P.restored_480p, P.final, P.logs, P.reports):
+        d.mkdir(parents=True, exist_ok=True)
+
+
 def setup_logging(name: str, verbose: bool = False) -> logging.Logger:
     """Log to both stdout and logs/<name>.log so long runs leave a trail."""
-    P.logs.mkdir(parents=True, exist_ok=True)
+    ensure_run_dirs()
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     logger.handlers.clear()

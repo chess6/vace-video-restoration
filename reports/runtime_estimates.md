@@ -59,10 +59,17 @@ running conditional and unconditional passes every step.
    acceleration hack.
 
 3. **Do production on the cloud 14B profile.** This is what
-   `configs/cloud_14b.yaml` exists for, and these numbers are the strongest
-   argument for it. A 48 GB L40S runs the 14B model at native 720p faster than
-   this card runs the 1.3B at 480p, and the same manifest, references, masks and
-   depth videos carry over unchanged.
+   `configs/cloud_14b.yaml` exists for, and the numbers above are the strongest
+   argument for it: the same manifest, references, masks and depth videos carry
+   over unchanged.
+
+   What is **not** established is which rented GPU it needs. The fp16 14B
+   checkpoint is ~34.7 GB on its own, and the official VACE example presents
+   14B/720p across eight GPUs, so "one 48 GB card is enough" is a hypothesis to
+   test, not a plan to budget against. Rent by the hour, run
+   `scripts/benchmark.py` and one pilot chunk first, and only then size the job.
+   Every figure in this document was measured on the 1.3B/480p profile on this
+   machine; none of it transfers to 14B/720p by arithmetic.
 
 4. **Only then** consider acceleration (CausVid / TeaCache / fp8). Deliberately
    excluded from the baseline, per the brief, until the baseline output is known

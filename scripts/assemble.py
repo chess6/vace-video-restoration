@@ -72,10 +72,87 @@ class FrameWriter:
         return self.count
 
 
-def stitch_shot(chunks: list[dict], fps: int, out_path: Path, log) -> int:
-    """Concatenate one shot's chunks, dropping duplicated overlap frames.
+def plan_stitch(spans: list[tuple[int, int]], blend_max: int = 8) -> list[tuple]:
+    """Decide, from absolute frame spans alone, what to emit and in what order.
 
-    Streams to disk holding at most two chunks in memory. A shot can be the whole
+    `spans` is [(start_frame, n_frames), ...] for the chunks of one shot, in any
+    order. Returns a list of operations, each covering a contiguous run of the
+    output timeline and, together, covering [min(start), max(end)) exactly once:
+
+        ("copy",   i, off, n)                 n frames from chunk i at offset off
+        ("blend",  i, off_i, j, off_j, n)     cross-dissolve chunk i into chunk j
+        ("source", a, n)                      n frames from the normalized source
+        ("skip",   i)                         chunk i adds nothing; not emitted
+
+    Kept free of I/O so the arithmetic can be tested exhaustively over shot
+    lengths and missing-chunk patterns without generating any video.
+    """
+    order = sorted(range(len(spans)), key=lambda i: (spans[i][0], spans[i][1]))
+    ops: list[tuple] = []
+    first = order[0]
+    pend_i, pend_start, pend_len = first, spans[first][0], spans[first][1]
+    pend_off = 0            # how much of chunk pend_i has already been consumed
+
+    for i in order[1:]:
+        cur_start, cur_len = spans[i]
+        pend_end = pend_start + pend_len
+        cur_end = cur_start + cur_len
+
+        if cur_end <= pend_end:
+            ops.append(("skip", i))
+            continue
+
+        if cur_start >= pend_end:
+            ops.append(("copy", pend_i, pend_off, pend_len))
+            if cur_start > pend_end:
+                ops.append(("source", pend_end, cur_start - pend_end))
+            pend_i, pend_start, pend_len, pend_off = i, cur_start, cur_len, 0
+            continue
+
+        ov_start = max(cur_start, pend_start)
+        ov = pend_end - ov_start
+        blend = min(ov, blend_max)
+        keep = ov_start - pend_start
+        off = ov_start - cur_start
+        if keep:
+            ops.append(("copy", pend_i, pend_off, keep))
+        ops.append(("blend", pend_i, pend_off + keep, i, off, blend))
+        pend_i = i
+        pend_off = off + blend
+        pend_start = ov_start + blend
+        pend_len = cur_len - pend_off
+
+    ops.append(("copy", pend_i, pend_off, pend_len))
+    return ops
+
+
+def op_frames(op: tuple) -> int:
+    """How many output frames an operation contributes."""
+    return {"copy": lambda o: o[3], "blend": lambda o: o[5],
+            "source": lambda o: o[2], "skip": lambda o: 0}[op[0]](op)
+
+
+def stitch_shot(chunks: list[dict], fps: int, out_path: Path, log,
+                work: Path | None = None) -> tuple[int, int]:
+    """Concatenate one shot's chunks onto the shot's own absolute frame timeline.
+
+    Returns (span_start, n_written), where the result covers exactly
+    [span_start, span_start + n_written) in working-stream frame indices.
+
+    Everything is computed from absolute frame positions rather than from the
+    stored `overlap_prev`. Two things make that necessary:
+
+      * The last window of a shot is snapped BACKWARDS to end on the shot end, so
+        its overlap with the previous window can be far larger than the nominal
+        one - larger, in fact, than what is left of the previous chunk once its
+        own seam has been consumed. Comparing a full-chunk overlap against a
+        partly-consumed buffer both loses frames and, past a point, aborts.
+      * Chunks may be missing (a failed generation, or --only on a subset). Those
+        are real holes on the timeline, not a reason to slide later footage
+        earlier. Each hole is filled from the normalized source so that every
+        frame keeps its original position.
+
+    Streams to disk holding at most two chunks in memory: a shot can be the whole
     video when there are no scene cuts (28 800 frames at 832x480 would be ~34 GB
     as raw RGB), so buffering the shot is not an option on a 15 GiB machine.
 
@@ -83,7 +160,7 @@ def stitch_shot(chunks: list[dict], fps: int, out_path: Path, log) -> int:
     chunks genuinely contain those frames, so this blends two renderings of the
     same content rather than inventing a transition.
     """
-    ordered = sorted(chunks, key=lambda c: c["start_frame"])
+    ordered = sorted(chunks, key=lambda c: (c["start_frame"], c["end_frame"]))
 
     def load(c: dict) -> np.ndarray:
         p = P.root / c["output_path"]
@@ -95,32 +172,78 @@ def stitch_shot(chunks: list[dict], fps: int, out_path: Path, log) -> int:
                                f"{c['n_frames']}")
         return f
 
-    pending = load(ordered[0])
-    H, W = pending.shape[1], pending.shape[2]
-    writer = FrameWriter(out_path, W, H, fps)
+    def source_range(a: int, b: int) -> np.ndarray:
+        """Unrestored frames [a, b) from the normalized working stream."""
+        if work is None:
+            raise RuntimeError(
+                f"frames {a}-{b} have no restored chunk and no source stream was "
+                f"given to fill them from")
+        tmpf = out_path.parent / f"_hole_{a:07d}_{b:07d}.mkv"
+        slice_frames(work, tmpf, a, b, fps, log, lossless=True)
+        fr = read_frames(tmpf)
+        tmpf.unlink(missing_ok=True)
+        if len(fr) != b - a:
+            raise RuntimeError(f"source fill {a}-{b}: got {len(fr)} frames")
+        return fr
 
-    for c in ordered[1:]:
-        cur = load(c)
-        ov = int(c["overlap_prev"])
-        if ov <= 0:
-            writer.write(pending)
-            pending = cur
+    spans = [(c["start_frame"], c["n_frames"]) for c in ordered]
+    ops = plan_stitch(spans)
+    span_start = min(s for s, _ in spans)
+    span_end = max(s + n for s, n in spans)
+
+    # At most two decoded chunks are held at once: the plan only ever refers to
+    # the chunk being consumed and the one being blended into it.
+    cache: dict[int, np.ndarray] = {}
+
+    def frames_of(i: int) -> np.ndarray:
+        if i not in cache:
+            cache.clear()
+            cache[i] = load(ordered[i])
+        return cache[i]
+
+    def pair(i: int, j: int) -> tuple[np.ndarray, np.ndarray]:
+        a = cache.get(i)
+        if a is None:
+            a = load(ordered[i])
+        b = load(ordered[j])
+        cache.clear()
+        cache[j] = b
+        return a, b
+
+    writer = None
+    for op in ops:
+        if op[0] == "skip":
+            log.warning("%s is already covered by earlier chunks; skipped",
+                        ordered[op[1]]["chunk_id"])
             continue
-        if ov > len(pending):
-            raise RuntimeError(f"{c['chunk_id']}: overlap {ov} exceeds the "
-                               f"{len(pending)} frames available from the previous chunk")
-        blend = min(ov, 8)
-        keep = len(pending) - ov
-        writer.write(pending[:keep])
-        a = pending[keep:keep + blend].astype(np.float32)
-        b = cur[:blend].astype(np.float32)
-        w = np.linspace(0.0, 1.0, blend, dtype=np.float32)[:, None, None, None]
-        writer.write((a * (1 - w) + b * w).astype(np.uint8))
-        pending = cur[blend:]
-        log.debug("seam: overlap %d, dissolve %d, written %d", ov, blend, writer.count)
+        if op[0] == "copy":
+            _, i, off, n = op
+            block = frames_of(i)[off:off + n]
+        elif op[0] == "blend":
+            _, i, off_i, j, off_j, n = op
+            fa, fb = pair(i, j)
+            a = fa[off_i:off_i + n].astype(np.float32)
+            b = fb[off_j:off_j + n].astype(np.float32)
+            w = np.linspace(0.0, 1.0, n, dtype=np.float32)[:, None, None, None]
+            block = (a * (1 - w) + b * w).astype(np.uint8)
+            log.debug("seam: dissolve %d frame(s) between %s and %s", n,
+                      ordered[i]["chunk_id"], ordered[j]["chunk_id"])
+        else:                                   # "source"
+            _, a0, n = op
+            log.warning("Frames %d-%d have no restored chunk; filling them from "
+                        "the original so later frames keep their position.",
+                        a0, a0 + n)
+            block = source_range(a0, a0 + n)
+        if writer is None:
+            writer = FrameWriter(out_path, block.shape[2], block.shape[1], fps)
+        writer.write(block)
 
-    writer.write(pending)
-    return writer.close()
+    n = writer.close()
+    expect = span_end - span_start
+    if n != expect:
+        raise RuntimeError(f"stitched {n} frames but the span {span_start}-"
+                           f"{span_end} needs {expect}")
+    return span_start, n
 
 
 def main() -> int:
@@ -158,53 +281,82 @@ def main() -> int:
 
     tmp = P.intermediate / "_assembly"
     tmp.mkdir(parents=True, exist_ok=True)
-    segments: list[tuple[int, Path]] = []      # (start_frame, path)
+    work = P.root / man["normalized"]["work_path"]
+    segments: list[tuple[int, int, Path]] = []      # (start_frame, n_frames, path)
 
     for shot_id, cs in sorted(by_shot.items(), key=lambda kv: min(c["start_frame"] for c in kv[1])):
         seg = tmp / f"{shot_id}_stitched.mkv"
-        n_written = stitch_shot(cs, fps, seg, log)
-        start = min(c["start_frame"] for c in cs)
-        segments.append((start, seg))
-        log.info("shot %s: %d chunk(s) -> %d frames (%s)", shot_id, len(cs),
-                 n_written, human_time(n_written / fps))
+        start, n_written = stitch_shot(cs, fps, seg, log, work=work)
+        segments.append((start, n_written, seg))
+        log.info("shot %s: %d chunk(s) -> frames %d-%d (%s)", shot_id, len(cs),
+                 start, start + n_written, human_time(n_written / fps))
 
     # ---- fill unrestored gaps from the normalized source ---------------------
-    if not args.pilot:
-        work = P.root / man["normalized"]["work_path"]
-        total = man["normalized"]["total_frames"]
-        covered: list[tuple[int, int]] = []
-        for start, seg in segments:
-            covered.append((start, start + probe_frames(seg)))
-        covered.sort()
-        gaps: list[tuple[int, int]] = []
-        cursor = 0
-        for a, b in covered:
-            if a > cursor:
-                gaps.append((cursor, a))
-            cursor = max(cursor, b)
-        if cursor < total:
-            gaps.append((cursor, total))
-        for a, b in gaps:
-            if b - a <= 0:
-                continue
-            g = tmp / f"gap_{a:07d}.mkv"
-            slice_frames(work, g, a, b, fps, log, lossless=True)
-            segments.append((a, g))
-            log.warning("Gap %d-%d (%s) had no restored output; passing the "
-                        "original through so duration is preserved.",
-                        a, b, human_time((b - a) / fps))
+    # Holes INSIDE a shot were already filled in place by stitch_shot. What is
+    # left is everything outside the restored spans: shots that were never run,
+    # sub-legal shots that produced no window at all, and the head and tail.
+    # For the pilot the timeline is only the pilot window; for a full assembly it
+    # is the whole working stream.
+    if args.pilot and man.get("pilot"):
+        t_start, t_end = int(man["pilot"]["start_frame"]), int(man["pilot"]["end_frame"])
+    else:
+        t_start, t_end = 0, int(man["normalized"]["total_frames"])
+
+    covered = sorted((s, s + n) for s, n, _ in segments)
+    gaps: list[tuple[int, int]] = []
+    cursor = t_start
+    for a, b in covered:
+        if a > cursor:
+            gaps.append((cursor, a))
+        cursor = max(cursor, b)
+    if cursor < t_end:
+        gaps.append((cursor, t_end))
+    for a, b in gaps:
+        a, b = max(a, t_start), min(b, t_end)
+        if b - a <= 0:
+            continue
+        g = tmp / f"gap_{a:07d}.mkv"
+        slice_frames(work, g, a, b, fps, log, lossless=True)
+        segments.append((a, b - a, g))
+        log.warning("Gap %d-%d (%s) had no restored output; passing the "
+                    "original through so duration is preserved.",
+                    a, b, human_time((b - a) / fps))
 
     segments.sort(key=lambda s: s[0])
 
     # ---- concat (hard cuts between shots: no dissolve across a scene cut) ----
     listf = tmp / "concat.txt"
-    listf.write_text("".join(f"file '{p.resolve()}'\n" for _, p in segments))
+    listf.write_text("".join(f"file '{p.resolve()}'\n" for _, _, p in segments))
     silent = tmp / "master_silent.mkv"
     run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
          "-i", str(listf), "-c", "copy", str(silent)], log)
     n_master = probe_frames(silent)
-    log.info("Concatenated %d segment(s) -> %d frames (%s)", len(segments),
-             n_master, human_time(n_master / fps))
+    span_start = segments[0][0]
+    log.info("Concatenated %d segment(s) -> %d frames covering %d-%d (%s)",
+             len(segments), n_master, span_start, span_start + n_master,
+             human_time(n_master / fps))
+
+    # ---- crop to the exact requested window ----------------------------------
+    # A pilot is an exact frame interval, but the chunks covering it are whole
+    # 4n+1 windows that spill past both ends. The audio below is cut at the exact
+    # pilot timestamp, so without this the picture and the sound would describe
+    # different moments.
+    if (span_start, n_master) != (t_start, t_end - t_start):
+        lo, hi = t_start - span_start, t_end - span_start
+        if lo < 0 or hi > n_master:
+            raise RuntimeError(f"requested window {t_start}-{t_end} is not inside "
+                               f"the assembled span {span_start}-{span_start + n_master}")
+        cropped = tmp / "master_silent_cropped.mkv"
+        run(["ffmpeg", "-y", "-v", "error", "-i", str(silent), "-vf",
+             f"trim=start_frame={lo}:end_frame={hi},setpts=PTS-STARTPTS",
+             "-c:v", "ffv1", "-level", "3", "-an", str(cropped)], log)
+        n_cropped = probe_frames(cropped)
+        if n_cropped != t_end - t_start:
+            raise RuntimeError(f"crop produced {n_cropped} frames, expected "
+                               f"{t_end - t_start}")
+        log.info("Cropped to the requested window: frames %d-%d (%d frames)",
+                 t_start, t_end, n_cropped)
+        silent, n_master, span_start = cropped, n_cropped, t_start
 
     # ---- audio from the UNTOUCHED original -----------------------------------
     P.final.mkdir(parents=True, exist_ok=True)

@@ -55,7 +55,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
-    IMAGE_EXTS, P, human_time, load_config, load_manifest, probe_frames,
+    IMAGE_EXTS, P, human_time, load_config, load_manifest, probe_frames, rel,
     require_cuda, require_tools, run, save_manifest, setup_logging, slice_frames,
 )
 
@@ -63,7 +63,24 @@ DINO_ID = "IDEA-Research/grounding-dino-base"
 CLIP_ID = "openai/clip-vit-large-patch14"
 SAM2_ID = "facebook/sam2.1-hiera-large"
 
+# Exact Hugging Face revisions. Without these, `from_pretrained` follows the
+# repo's default branch, so the same code silently picks up different weights on
+# a later machine and the run stops being reproducible. Recorded in
+# reports/versions.md.
+DINO_REV = "12bdfa3120f3e7ec7b434d90674b3396eccf88eb"
+CLIP_REV = "32bd64288804d66eefd0ccbe215aa642df71cc41"
+SAM2_REV = "665f8e2ad61cf5f53d65644ff27c8ee525124610"
+
 DETECT_PROMPT = "a person. a human. a man. a woman. a child."
+
+# Grounding DINO box threshold. 0.30 suits clean photographs; a heavily degraded
+# low-resolution source scores the same true detection lower, so when the primary
+# pass finds nothing at all the shot is retried at DETECT_THRESHOLD_MIN before
+# being given up on. A weak *detection* is not the same as a weak *identity*
+# match: whether the shot is trusted is still decided by the fused face and
+# appearance score below, and a fallback detection is recorded in the report.
+DETECT_THRESHOLD = 0.30
+DETECT_THRESHOLD_MIN = 0.18
 
 # Decision thresholds. Deliberately conservative: it is cheaper to ask about one
 # shot than to silently restore the wrong person for 40 seconds.
@@ -94,18 +111,22 @@ class Models:
         if self._dino is None:
             from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
             self.log.info("Loading detector %s", DINO_ID)
-            self._dino_proc = AutoProcessor.from_pretrained(DINO_ID)
+            self._dino_proc = AutoProcessor.from_pretrained(DINO_ID, revision=DINO_REV)
+            # fp32 weights, not fp16: Grounding DINO fuses a fp32 text branch into
+            # the vision features, and a half-precision load fails inside the
+            # encoder with "mat1 and mat2 must have the same dtype". Speed comes
+            # from autocast in detect_people() instead. ~0.9 GiB of VRAM.
             self._dino = AutoModelForZeroShotObjectDetection.from_pretrained(
-                DINO_ID, dtype=self.torch.float16).to(self.dev).eval()
+                DINO_ID, revision=DINO_REV, dtype=self.torch.float32).to(self.dev).eval()
         return self._dino, self._dino_proc
 
     def clip(self):
         if self._clip is None:
             from transformers import CLIPModel, CLIPImageProcessor
             self.log.info("Loading appearance encoder %s", CLIP_ID)
-            self._clip_proc = CLIPImageProcessor.from_pretrained(CLIP_ID)
+            self._clip_proc = CLIPImageProcessor.from_pretrained(CLIP_ID, revision=CLIP_REV)
             self._clip = CLIPModel.from_pretrained(
-                CLIP_ID, dtype=self.torch.float16).to(self.dev).eval()
+                CLIP_ID, revision=CLIP_REV, dtype=self.torch.float16).to(self.dev).eval()
         return self._clip, self._clip_proc
 
     def face(self):
@@ -130,7 +151,7 @@ class Models:
         if self._sam is None:
             from sam2.sam2_video_predictor import SAM2VideoPredictor
             self.log.info("Loading tracker %s", SAM2_ID)
-            self._sam = SAM2VideoPredictor.from_pretrained(SAM2_ID, device=self.dev)
+            self._sam = SAM2VideoPredictor.from_pretrained(SAM2_ID, revision=SAM2_REV, device=self.dev)
         return self._sam
 
     def release(self, *names: str):
@@ -164,12 +185,16 @@ class Models:
         return np.asarray(f.normed_embedding, dtype=np.float32), \
             tuple(float(v) for v in f.bbox), float(fa)
 
-    def detect_people(self, pil_image, threshold=0.30) -> list[tuple]:
+    def detect_people(self, pil_image, threshold=DETECT_THRESHOLD) -> list[tuple]:
         model, proc = self.dino()
         with self.torch.inference_mode():
             inputs = proc(images=pil_image, text=DETECT_PROMPT,
                           return_tensors="pt").to(self.dev)
-            res = model(**inputs)
+            # autocast rather than a manual .half(): the model is fp32 (see
+            # dino()) and autocast casts only the ops that are safe in half,
+            # leaving the text branch alone.
+            with self.torch.autocast("cuda", dtype=self.torch.float16):
+                res = model(**inputs)
             post = proc.post_process_grounded_object_detection(
                 res, inputs.input_ids, threshold=threshold, text_threshold=0.25,
                 target_sizes=[(pil_image.height, pil_image.width)])[0]
@@ -286,12 +311,21 @@ def extract_shot_frames(work: Path, out_dir: Path, start: int, end: int,
 # ---------------------------------------------------------------------------
 
 def track_shot(models: Models, frames_dir: Path, n_frames: int, seed_frame: int,
-               seed: dict, log, window: int = 240) -> tuple[np.ndarray, list[float]]:
-    """Propagate a seed through the shot, returning (masks[T,H,W] uint8, scores).
+               seed: dict, log, window: int = 240, reseed=None,
+               max_recoveries: int = 8, min_gap: int = 4
+               ) -> tuple[np.ndarray, list[float], list[tuple[int, int]]]:
+    """Propagate a seed through the shot.
+
+    Returns (masks[T,H,W] uint8, scores, absent_ranges), where absent_ranges are
+    [a, b) spans in which re-detection found no one matching the identity bank.
 
     Long shots are processed in overlapping windows because SAM 2's video state
     grows with frame count and would otherwise exhaust VRAM on a 12 GB card.
     Each new window is re-seeded from the last confident mask of the previous one.
+
+    `reseed(frame_idx) -> seed dict | None` is called to restart the track after a
+    loss. Passing None disables recovery (used by the manual-seed path, where the
+    user has already said where the subject is).
     """
     import torch
     predictor = models.sam()
@@ -345,37 +379,116 @@ def track_shot(models: Models, frames_dir: Path, n_frames: int, seed_frame: int,
                     filled[g] = True
         shutil.rmtree(sub, ignore_errors=True)
 
+    def present_at(t: int) -> bool:
+        return mask_present(masks, t)
+
+    def extend_forward(end: int, limit: int) -> int:
+        """Chain windows forward from `end` while there is a mask to re-seed on."""
+        while end < limit:
+            anchor = end - 1
+            if not present_at(anchor):
+                return end
+            nw_end = min(limit, end + window - 1)
+            run_window(anchor, nw_end, anchor, {"mask": masks[anchor] > 127})
+            if nw_end <= end:
+                return end
+            end = nw_end
+        return end
+
+    def extend_backward(start: int, limit: int) -> int:
+        while start > limit:
+            if not present_at(start):
+                return start
+            nw_start = max(limit, start - window + 1)
+            run_window(nw_start, start + 1, start, {"mask": masks[start] > 127})
+            if nw_start >= start:
+                return start
+            start = nw_start
+        return start
+
+    def empty_runs() -> list[tuple[int, int]]:
+        return mask_gaps(masks[:n_frames])
+
     # ---- first window ------------------------------------------------------
     w_start = max(0, min(seed_frame - window // 2, n_frames - window))
     w_start = max(0, w_start)
     w_end = min(n_frames, w_start + window)
     run_window(w_start, w_end, seed_frame, seed)
 
-    # ---- extend forwards ----------------------------------------------------
-    while w_end < n_frames:
-        prev_end = w_end
-        anchor = prev_end - 1
-        if masks[anchor].sum() == 0:
-            log.warning("No mask at frame %d to re-seed from; re-detecting.", anchor)
-            break
-        nw_end = min(n_frames, prev_end + window - 1)
-        run_window(anchor, nw_end, anchor, {"mask": masks[anchor] > 127})
-        if nw_end <= w_end:
-            break
-        w_end = nw_end
+    w_end = extend_forward(w_end, n_frames)
+    w_start = extend_backward(w_start, 0)
 
-    # ---- extend backwards ---------------------------------------------------
-    while w_start > 0:
-        anchor = w_start
-        if masks[anchor].sum() == 0:
-            break
-        nw_start = max(0, w_start - window + 1)
-        run_window(nw_start, anchor + 1, anchor, {"mask": masks[anchor] > 127})
-        if nw_start >= w_start:
-            break
-        w_start = nw_start
+    # ---- recovery ------------------------------------------------------------
+    # Propagation stops wherever the subject leaves frame or SAM 2 loses the
+    # track, which used to end the shot: everything past that point stayed black
+    # and was merely reported as an event. Instead, re-detect inside each hole and
+    # restart propagation there. A hole where re-detection finds nobody matching
+    # the identity bank is genuine absence, and is returned as such so the caller
+    # can treat it as intentional pass-through rather than a failure.
+    absent: list[tuple[int, int]] = []
+    if reseed is not None:
+        tried: set[tuple[int, int]] = set()
+        for _ in range(max_recoveries):
+            holes = [r for r in empty_runs()
+                     if r[1] - r[0] >= min_gap and r not in tried]
+            if not holes:
+                break
+            a, b = max(holes, key=lambda r: r[1] - r[0])
+            tried.add((a, b))
+            probe = (a + b) // 2
+            new_seed = reseed(probe)
+            if new_seed is None:
+                log.info("Frames %d-%d: no matching subject found; treating as "
+                         "absent (nothing to regenerate there).", a, b)
+                absent.append((a, b))
+                continue
+            log.info("Frames %d-%d: re-seeded at frame %d, resuming the track.",
+                     a, b, probe)
+            ws = max(a, min(probe - window // 2, b - window))
+            ws = max(a, ws)
+            run_window(ws, min(b, ws + window), probe, new_seed)
+            extend_forward(min(b, ws + window), b)
+            extend_backward(ws, a)
 
-    return masks, scores
+    return masks, scores, absent
+
+
+def mask_present(masks: np.ndarray, t: int) -> bool:
+    """Is the subject masked in frame t at all?"""
+    h, w = masks.shape[1], masks.shape[2]
+    return bool((masks[t] > 127).sum() / float(h * w) > MIN_AREA_FRAC)
+
+
+def mask_gaps(masks: np.ndarray) -> list[tuple[int, int]]:
+    """Maximal [a, b) ranges with no subject mask - the holes recovery targets."""
+    runs: list[tuple[int, int]] = []
+    a = None
+    for t in range(len(masks)):
+        if not mask_present(masks, t):
+            a = t if a is None else a
+        elif a is not None:
+            runs.append((a, t))
+            a = None
+    if a is not None:
+        runs.append((a, len(masks)))
+    return runs
+
+
+def skip_shot_chunks(man: dict, shot_id: str, reason: str) -> int:
+    """Mark a shot's chunks as intentionally skipped.
+
+    A shot with no subject in it has nothing to regenerate. Marking its chunks
+    `skipped` keeps them out of the generation queue and out of the full-run
+    preflight, and assembly then passes the original frames through at their
+    original positions.
+    """
+    n = 0
+    for c in man.get("chunks", []):
+        if c["shot_id"] == shot_id and c.get("status") in (None, "", "pending"):
+            c["status"] = "skipped"
+            c["error"] = reason
+            n += 1
+    return n
 
 
 def diagnose(masks: np.ndarray, scores: list[float], log) -> list[dict]:
@@ -408,6 +521,13 @@ def write_mask_video(masks: np.ndarray, out: Path, fps: int, grow: int,
                      feather: int, log) -> None:
     """Grayscale mask video: WHITE = regenerate (the subject), BLACK = preserve.
 
+    Dilation is applied here, because it is a decision about how much of the
+    silhouette edge and contact shadow belongs to the subject. Feathering is NOT:
+    the workflow's FeatherMask node softens the edge with the configured radius
+    just before conditioning. Doing it in both places softened twice, so the
+    configured radius did not describe the edge the model actually saw, and the
+    result was pixels regenerated outside the intended boundary.
+
     Holes inside the figure (e.g. a gap between an arm and the torso) are left as
     SAM 2 produced them; no fill-holes is applied, so background visible through
     the figure stays preserved.
@@ -415,6 +535,8 @@ def write_mask_video(masks: np.ndarray, out: Path, fps: int, grow: int,
     import cv2
     T, H, W = masks.shape
     out.parent.mkdir(parents=True, exist_ok=True)
+    if feather:
+        log.debug("Feather %d px is applied by the workflow, not here.", feather)
     ff = subprocess.Popen(
         ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "gray",
          "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
@@ -427,9 +549,6 @@ def write_mask_video(masks: np.ndarray, out: Path, fps: int, grow: int,
         m = masks[t]
         if k is not None:
             m = cv2.dilate(m, k)
-        if feather > 0:
-            r = feather * 2 + 1
-            m = cv2.GaussianBlur(m, (r, r), 0)
         ff.stdin.write(m.astype(np.uint8).tobytes())
     ff.stdin.close()
     ff.wait()
@@ -493,6 +612,14 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="Retrack even if masks exist")
     ap.add_argument("--window", type=int, default=240, help="SAM2 propagation window")
     ap.add_argument("--keep-frames", action="store_true", help="Keep extracted JPEGs")
+    ap.add_argument("--no-recover", action="store_true",
+                    help="Do not re-detect and restart the track after a loss")
+    ap.add_argument("--detect-threshold", type=float, default=DETECT_THRESHOLD,
+                    help=f"Grounding DINO box threshold (default {DETECT_THRESHOLD})")
+    ap.add_argument("--detect-threshold-min", type=float, default=DETECT_THRESHOLD_MIN,
+                    help="Retry threshold used only when the primary pass finds "
+                         f"nothing at all (default {DETECT_THRESHOLD_MIN}). "
+                         "Set equal to --detect-threshold to disable the retry.")
     # manual seeds (only needed for shots flagged needs_user)
     ap.add_argument("--init-box", default=None, help="x0,y0,x1,y1 in working-stream pixels")
     ap.add_argument("--init-points", nargs="*", default=None, help="x,y,+ x,y,- ...")
@@ -587,49 +714,82 @@ def main() -> int:
         else:
             # representative frames spread across the shot
             probes = sorted(set(int(x) for x in np.linspace(0, n - 1, min(6, n))))
-            best = None
-            all_cands: list[dict] = []
-            for pf in probes:
-                im = Image.open(frames[pf]).convert("RGB")
-                boxes = models.detect_people(im)
-                for b in boxes[:5]:
-                    crop = im.crop(tuple(int(v) for v in b[:4]))
-                    if crop.width < 12 or crop.height < 24:
-                        continue
-                    sc = score_candidate(models, bank, crop)
-                    cand = {"frame": pf, "box": list(b[:4]), "det_score": b[4], **sc}
-                    all_cands.append(cand)
-                    if best is None or cand["fused"] > best["fused"]:
-                        best = cand
+
+            def probe_pass(thr: float) -> tuple[dict | None, list[dict]]:
+                best_c, cands = None, []
+                for pf in probes:
+                    im = Image.open(frames[pf]).convert("RGB")
+                    for b in models.detect_people(im, threshold=thr)[:5]:
+                        crop = im.crop(tuple(int(v) for v in b[:4]))
+                        if crop.width < 12 or crop.height < 24:
+                            continue
+                        sc = score_candidate(models, bank, crop)
+                        cand = {"frame": pf, "box": list(b[:4]), "det_score": b[4], **sc}
+                        cands.append(cand)
+                        if best_c is None or cand["fused"] > best_c["fused"]:
+                            best_c = cand
+                return best_c, cands
+
+            det_thr = args.detect_threshold
+            best, all_cands = probe_pass(det_thr)
+            if best is None and args.detect_threshold_min < det_thr:
+                det_thr = args.detect_threshold_min
+                log.warning("%s: nothing above the %.2f detection threshold; "
+                            "retrying at %.2f (degraded sources score lower)",
+                            sid, args.detect_threshold, det_thr)
+                best, all_cands = probe_pass(det_thr)
+                if best is not None:
+                    log.warning("%s: seeded from a WEAK detection (score %.3f). "
+                                "Identity scoring still decides whether this shot "
+                                "is trusted; check its review sheet.",
+                                sid, best["det_score"])
             if best is None:
-                log.warning("%s: no person detected in any probe frame. "
-                            "Marked needs_user; no mask written.", sid)
-                shot["subject_status"] = "needs_user"
-                shot["subject_note"] = "no person detected"
-                needs_user.append(sid)
-                report.append({"shot_id": sid, "status": "needs_user",
+                # Nobody matching anywhere in the shot. That is a fact about the
+                # footage, not a failure to be fixed: the shot is passed through
+                # unrestored. It no longer blocks the full-run preflight.
+                log.info("%s: no person detected in any probe frame. Marked "
+                         "subject_absent; the shot passes through unrestored.", sid)
+                shot["subject_status"] = "subject_absent"
+                shot["subject_note"] = "no person detected in any probe frame"
+                skip_shot_chunks(man, sid, "subject_absent")
+                report.append({"shot_id": sid, "status": "subject_absent",
                                "reason": "no person detected", "confidence": 0.0})
                 if not args.keep_frames:
                     shutil.rmtree(frames_dir, ignore_errors=True)
                 continue
 
-            same_frame = [c for c in all_cands if c["frame"] == best["frame"]]
-            same_frame.sort(key=lambda c: -c["fused"])
-            runner_up = same_frame[1]["fused"] if len(same_frame) > 1 else 0.0
-            margin = best["fused"] - runner_up
+            # Ambiguity is a per-frame question: within one frame, does a second
+            # person score nearly as well as the winner? Comparing across frames
+            # would compare the subject with itself. The worst frame governs,
+            # because an ambiguous frame anywhere can capture the wrong figure -
+            # only the winning frame used to be examined.
+            per_frame: dict[int, list[float]] = {}
+            for c in all_cands:
+                per_frame.setdefault(c["frame"], []).append(c["fused"])
+            margins = {fr: (sorted(v, reverse=True)[0] - sorted(v, reverse=True)[1])
+                       for fr, v in per_frame.items() if len(v) > 1}
+            win_top = sorted(per_frame[best["frame"]], reverse=True)
+            runner_up = win_top[1] if len(win_top) > 1 else 0.0
+            worst_frame = min(margins, key=margins.get) if margins else best["frame"]
+            margin = margins.get(worst_frame, best["fused"] - runner_up)
             conf = best["fused"]
             seed = {"box": best["box"]}
             seed_frame = best["frame"]
             detail = {"source": "auto", "n_candidates": len(all_cands),
+                      "detect_threshold": det_thr,
+                      "weak_detection": det_thr < args.detect_threshold,
                       "runner_up": round(runner_up, 4), "margin": round(margin, 4),
+                      "margin_worst_frame": int(worst_frame),
+                      "margin_in_seed_frame": round(best["fused"] - runner_up, 4),
+                      "frames_probed": len(per_frame),
                       **{k: (round(v, 4) if isinstance(v, float) else v)
                          for k, v in best.items() if k != "box"}}
             log.info("%s: best candidate frame=%d fused=%.3f (face=%s app=%s "
-                     "face_w=%.2f) margin=%.3f over %d candidates",
+                     "face_w=%.2f) worst margin=%.3f at frame %d over %d candidates",
                      sid, seed_frame, conf,
                      f"{best['face_sim']:.3f}" if best["face_sim"] is not None else "n/a",
                      f"{best['app_sim']:.3f}" if best["app_sim"] is not None else "n/a",
-                     best["face_weight"], margin, len(all_cands))
+                     best["face_weight"], margin, worst_frame, len(all_cands))
 
             if conf < AUTO_ACCEPT or margin < AMBIGUOUS_MARGIN:
                 reason = ("low confidence" if conf < AUTO_ACCEPT
@@ -642,9 +802,34 @@ def main() -> int:
                 needs_user.append(sid)
 
         # ---- track ------------------------------------------------------------
+        def reseed_at(frame_idx: int, _sid=sid) -> dict | None:
+            """Re-detect the subject at one frame, for restarting a lost track.
+
+            Returns a box seed only if the best candidate clears the same identity
+            bar used for auto-acceptance, so a lost track is never silently
+            resumed on the wrong person; a weaker match leaves the gap empty.
+            """
+            im = Image.open(frames[frame_idx]).convert("RGB")
+            found = None
+            for thr in (args.detect_threshold, args.detect_threshold_min):
+                boxes = models.detect_people(im, threshold=thr)
+                for b in boxes[:5]:
+                    crop = im.crop(tuple(int(v) for v in b[:4]))
+                    if crop.width < 12 or crop.height < 24:
+                        continue
+                    sc = score_candidate(models, bank, crop)
+                    if found is None or sc["fused"] > found["fused"]:
+                        found = {"box": list(b[:4]), **sc}
+                if found is not None or thr == args.detect_threshold_min:
+                    break
+            if found is None or found["fused"] < AUTO_ACCEPT:
+                return None
+            return {"box": found["box"]}
+
         t0 = time.time()
-        masks, scores = track_shot(models, frames_dir, n, seed_frame, seed, log,
-                                   window=args.window)
+        masks, scores, absent = track_shot(
+            models, frames_dir, n, seed_frame, seed, log, window=args.window,
+            reseed=None if args.no_recover else reseed_at)
         events = diagnose(masks, scores, log)
         area_frac = float((masks > 127).mean())
         elapsed = time.time() - t0
@@ -657,13 +842,27 @@ def main() -> int:
         if len(events) > 8:
             log.warning("  ... and %d more (see the JSON report)", len(events) - 8)
 
+        absent_frames = sum(b - a for a, b in absent)
+        if absent:
+            log.info("%s: %d frame(s) in %d span(s) have no matching subject; "
+                     "they are preserved as-is.", sid, absent_frames, len(absent))
+
         if area_frac < MIN_AREA_FRAC:
-            log.error("%s: tracked region is essentially empty (%.4f%%). "
-                      "Flagging needs_user.", sid, 100 * area_frac)
-            shot["subject_status"] = "needs_user"
-            shot["subject_note"] = "tracked mask empty"
-            if sid not in needs_user:
-                needs_user.append(sid)
+            if absent_frames >= n:
+                # Re-detection looked and found nobody anywhere: absence, not a
+                # tracking failure, so it does not need the user.
+                log.info("%s: subject absent throughout; the shot passes through "
+                         "unrestored.", sid)
+                shot["subject_status"] = "subject_absent"
+                shot["subject_note"] = "subject absent throughout"
+                skip_shot_chunks(man, sid, "subject_absent")
+            else:
+                log.error("%s: tracked region is essentially empty (%.4f%%). "
+                          "Flagging needs_user.", sid, 100 * area_frac)
+                shot["subject_status"] = "needs_user"
+                shot["subject_note"] = "tracked mask empty"
+                if sid not in needs_user:
+                    needs_user.append(sid)
 
         write_mask_video(masks, mask_video, fps, grow, feather, log)
         got = probe_frames(mask_video)
@@ -675,7 +874,7 @@ def main() -> int:
                             [seed_frame] + [e["frame"] for e in events[:6]], log)
 
         shot["subject_confidence"] = round(float(conf), 4)
-        if shot.get("subject_status") != "needs_user":
+        if shot.get("subject_status") not in ("needs_user", "subject_absent"):
             shot["subject_status"] = "auto"
         report.append({
             "shot_id": sid, "status": shot["subject_status"],
@@ -683,8 +882,10 @@ def main() -> int:
             "seed": {k: (v.tolist() if isinstance(v, np.ndarray) else v)
                      for k, v in seed.items() if k != "mask"},
             "selection": detail, "mean_mask_area_frac": round(area_frac, 5),
-            "events": events, "mask_video": str(mask_video.relative_to(P.root)),
-            "review_sheet": f"intermediate/masks/review/{sid}_review.png",
+            "absent_ranges": [[int(a), int(b)] for a, b in absent],
+            "absent_frames": int(absent_frames),
+            "events": events, "mask_video": rel(mask_video),
+            "review_sheet": rel(review_dir / f"{sid}_review.png"),
             "track_seconds": round(elapsed, 1),
         })
 
@@ -745,14 +946,24 @@ def main() -> int:
         "shots_in_this_run": [s["shot_id"] for s in report],
         "shots": all_shots,
         "needs_user": all_needs,
+        # Deliberate pass-through, not an open question: no one matching the
+        # identity bank appears in these shots, so there is nothing to regenerate.
+        "subject_absent": sorted(sid for sid, s in merged.items()
+                                 if s.get("status") == "subject_absent"),
     }, indent=2))
     needs_user = all_needs
+    absent_shots = sorted(sid for sid, s in merged.items()
+                          if s.get("status") == "subject_absent")
 
     log.info("=" * 62)
     log.info("Tracked %d shot(s) in %s; %d chunk mask slice(s) written",
              len(report), human_time(time.time() - t_all), made)
     log.info("Review sheets: %s", review_dir)
     log.info("Report       : reports/tracking_report.json")
+    if absent_shots:
+        log.info("%d shot(s) have no subject and pass through unrestored: %s",
+                 len(absent_shots), ", ".join(absent_shots[:8])
+                 + (" ..." if len(absent_shots) > 8 else ""))
     if needs_user:
         log.warning("%d shot(s) need your input: %s", len(needs_user),
                     ", ".join(needs_user))

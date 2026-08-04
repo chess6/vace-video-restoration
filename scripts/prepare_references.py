@@ -38,7 +38,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import IMAGE_EXTS, P, load_config, setup_logging  # noqa: E402
+from common import IMAGE_EXTS, P, load_config, load_manifest, setup_logging  # noqa: E402
 
 MIN_SIDE = 256          # below this a reference adds noise, not identity
 MIN_SHARPNESS = 12.0    # Laplacian variance on the subject crop
@@ -240,6 +240,20 @@ def main() -> int:
     log = setup_logging("prepare_references", args.verbose)
     cfg = load_config(args.config)
     W, H = cfg["video"]["width"], cfg["video"]["height"]
+    # preprocess_source.py --auto-aspect may have overridden the config dimensions
+    # to match the true source aspect ratio. Prefer what it recorded: WanVaceToVideo
+    # rescales reference_image to (width, height) with a CENTER CROP, so a sheet
+    # built at the config size would have its outer panels trimmed.
+    if P.manifest.exists():
+        try:
+            norm = load_manifest()["normalized"]
+            if (norm["width"], norm["height"]) != (W, H):
+                log.info("Manifest dimensions %dx%d override config %dx%d",
+                         norm["width"], norm["height"], W, H)
+                W, H = norm["width"], norm["height"]
+        except (KeyError, json.JSONDecodeError) as e:
+            log.warning("Could not read dimensions from the manifest (%s); "
+                        "using the config size %dx%d", e, W, H)
     refs_dir = args.refs_dir or P.references
 
     files = sorted(p for p in refs_dir.iterdir()
