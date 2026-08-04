@@ -17,9 +17,17 @@ Strict division of authority:
     low-frequency colour and structure while generating only the missing
     high-frequency texture.
 
-References are still clustered by appearance so conflicting outfits are never
-combined, but that clustering now serves identity selection; it is not what
-fixes the garment. Panels carry provenance and validation scores.
+Which photographs become panels is decided by IDENTITY EVIDENCE ALONE:
+leave-one-out face agreement across the reference set, how many pixels the face
+occupies, and - for the second panel - how different the viewing angle is. Never
+by garment colour. Garment distance is still measured and recorded, purely as
+evidence that the photographs show other clothes; it is a diagnostic, never a
+switch, and the source remains the garment authority whatever it says.
+
+Appearance clustering still runs and is still recorded, but it no longer confines
+the choice. Its job was to stop two outfits being combined in one conditioning
+image, and there is no longer an outfit in an external panel to conflict - so
+restricting panels to a single cluster would only discard viewing angles.
 
 Clustering is automatic (CLIP appearance embeddings + garment histograms), and
 so is garment parsing (SegFormer). No manual labelling anywhere.
@@ -76,17 +84,40 @@ def mask_to_identity(im, labels, feather: int = 3):
     A few pixels of feather stop the cut-out edge from reading as a hard graphic
     shape, which would itself become something to reproduce.
     """
-    import cv2
     from PIL import Image
     arr = np.asarray(im).astype(np.float32)
     m = identity_regions(labels).astype(np.float32)
     if feather > 0:
+        import cv2
         r = feather * 2 + 1
         m = cv2.GaussianBlur(m, (r, r), 0)
     # Neutral mid-grey, not black: a large black field shifts the exposure the
     # model infers from the panel.
     out = arr * m[..., None] + 128.0 * (1.0 - m[..., None])
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), float(m.mean())
+
+
+def build_panel_images(face_panel: dict, source_crop, alt_panel: dict | None):
+    """The panel images, in sheet order, with the authority split enforced here.
+
+    Externals in, identity-only out; the source crop passes through untouched.
+    Keeping this in one function means the rule is one testable statement rather
+    than something a future edit to the rendering loop can quietly break.
+
+    Returns (images, kept_fractions) where kept_fractions[i] is None for the
+    source panel, which is never masked.
+    """
+    from PIL import Image
+    face_img, face_keep = mask_to_identity(face_panel["image"],
+                                           face_panel["labels"])
+    imgs = [face_img, Image.fromarray(np.asarray(source_crop))]
+    keeps: list[float | None] = [face_keep, None]
+    if alt_panel is not None:
+        alt_img, alt_keep = mask_to_identity(alt_panel["image"],
+                                             alt_panel["labels"])
+        imgs.append(alt_img)
+        keeps.append(alt_keep)
+    return imgs, keeps
 
 
 class Parser:
@@ -218,11 +249,14 @@ def source_outfit(work: Path, mask_video: Path, parser: Parser, n_probe: int,
     return {"palette": smoothed, "best": best, "n_probe": len(per_frame)}
 
 
-def cluster_references(files: list[Path], parser: Parser, models, bank, log,
+def cluster_references(files: list[Path], parser: Parser, models, log,
                        thresh: float) -> list[dict]:
-    """Group the external photographs by appearance, so one pack never mixes
-    two different outfits. Identity is checked separately: a photo of someone
-    else is dropped before clustering, not clustered with them."""
+    """Group the external photographs by appearance, and gather everything the
+    panel choice needs: garment palette, CLIP embedding, face embedding, size.
+
+    The grouping is now diagnostic - see the module docstring. Identity is a
+    separate question, decided in score_identity() from these same embeddings.
+    """
     from PIL import Image, ImageOps
     items = []
     for f in files:
@@ -265,9 +299,55 @@ def cluster_references(files: list[Path], parser: Parser, models, bank, log,
         if not placed:
             groups.append({"members": [it], "palette": dict(it["palette"])})
     for i, g in enumerate(groups):
+        for m in g["members"]:
+            m["cluster"] = i
         log.info("appearance cluster %d: %d image(s) - %s", i, len(g["members"]),
                  ", ".join(m["file"].name for m in g["members"][:6]))
     return groups
+
+
+def score_identity(items: list[dict]) -> None:
+    """Rate each photograph on how well it serves IDENTITY conditioning, in place.
+
+    Deliberately blind to garment colour. Once clothing is segmented out of the
+    external panels, which outfit a photograph happens to show says nothing about
+    how well it depicts the face, and letting it decide would reintroduce exactly
+    the coupling these packs exist to break.
+
+    Agreement is LEAVE-ONE-OUT: each photograph is compared against the face
+    embeddings of the OTHERS, never against a bank that contains itself. Scoring
+    against the whole reference set returns 1.000 for any photo that is in it,
+    which is a self-comparison dressed up as evidence - the same shape of mistake
+    as measuring a mask's overlap with its own complement. What is wanted is
+    whether the rest of the reference set agrees this is the same person.
+
+      agreement  leave-one-out face similarity: is this the right person
+      face_res   how many pixels the face occupies; a correct match at 20 px
+                 carries no detail worth transferring
+
+    Weighted in that order, because a confident wrong identity is the worst
+    outcome available. Photographs with no detectable face score zero: they can
+    still be the right person, but nothing here can show that they are.
+    """
+    faces = [m for m in items if m["face"] is not None]
+    E = np.stack([m["face"] for m in faces]) if faces else None
+    for m in items:
+        agree = 0.0
+        if m["face"] is not None and E is not None and len(faces) > 1:
+            sims = E @ m["face"]
+            # Drop this photograph's own row rather than trusting a threshold:
+            # a genuine near-duplicate should still count as agreement.
+            own = next(i for i, o in enumerate(faces) if o is m)
+            agree = float(np.max(np.delete(sims, own)))
+        w, h = m["size"]
+        # sqrt -> a face side length; ~200 px is already ample for conditioning,
+        # so the score saturates there instead of rewarding ever-larger portraits.
+        px = float(m["face_frac"] or 0.0) * w * h
+        res = float(np.clip(np.sqrt(px) / 200.0, 0.0, 1.0))
+        m["identity"] = {"agreement": round(agree, 4),
+                         "face_resolution": round(res, 4),
+                         "face_pixels": int(px),
+                         "score": round(0.7 * agree + 0.3 * res, 4)}
 
 
 def main() -> int:
@@ -288,7 +368,9 @@ def main() -> int:
     man = load_manifest()
     import track_subject as T
     models = T.Models(log)
-    bank = T.build_identity_bank(models, log)
+    # No identity bank here on purpose: it is built from these same
+    # photographs, so scoring one against it is a self-comparison. Identity
+    # agreement is computed leave-one-out in score_identity() instead.
     parser = Parser(log)
 
     work = P.root / man["normalized"]["work_path"]
@@ -300,7 +382,7 @@ def main() -> int:
         log.error("No reference images in %s", P.references)
         return 1
 
-    groups = cluster_references(refs, parser, models, bank, log, args.outfit_deltae)
+    groups = cluster_references(refs, parser, models, log, args.outfit_deltae)
 
     chunks = pilot_chunks(man) if args.pilot else man["chunks"]
     shot_ids = sorted({c["shot_id"] for c in chunks})
@@ -319,40 +401,89 @@ def main() -> int:
         log.info("%s: learning the current outfit from the source", sid)
         outfit = source_outfit(work, mask_video, parser, args.probe_frames, log)
 
-        # Choose the appearance cluster whose garments match THIS shot's clothes.
-        best_g, best_d = None, None
-        for gi, g in enumerate(groups):
-            shared = set(g["palette"]) & set(outfit["palette"])
-            if not shared:
-                continue
-            d = float(np.mean([delta_e(g["palette"][k]["lab"],
-                                       outfit["palette"][k]["lab"]) for k in shared]))
-            if best_d is None or d < best_d:
-                best_g, best_d = gi, d
-        if best_g is None:
-            log.warning("No reference cluster shares a garment class with this "
-                        "shot; using cluster 0 for identity only.")
-            best_g, best_d = 0, float("nan")
-        exact = best_d is not None and best_d == best_d and best_d < args.outfit_deltae
-        log.info("Closest appearance cluster: %d (garment dE %.1f) -> %s", best_g,
-                 best_d if best_d == best_d else float("nan"),
-                 "treated as the SAME outfit" if exact else
-                 "treated as a DIFFERENT outfit; clothes will come from the source")
+        # Panels are chosen on IDENTITY EVIDENCE ALONE, across every reference.
+        #
+        # Appearance clusters exist to stop two different outfits being combined
+        # into one conditioning image. That constraint no longer binds the
+        # external panels: their clothing is segmented out before they are drawn,
+        # so there is no outfit left to conflict. Confining the choice to one
+        # cluster would now throw away viewing angles for no benefit - and
+        # missing viewpoints were a real weakness of these references. Clusters
+        # are still computed and recorded, as a diagnostic.
+        items = [m for g in groups for m in g["members"]]
+        score_identity(items)
+        ranked = sorted(items, key=lambda m: (m["identity"]["score"],
+                                              m["identity"]["face_pixels"],
+                                              m["file"].name), reverse=True)
+        for m in ranked:
+            i = m["identity"]
+            log.info("%-34s identity %.3f (leave-one-out agreement %.3f, face "
+                     "%d px, cluster %d)", m["file"].name, i["score"],
+                     i["agreement"], i["face_pixels"], m["cluster"])
+        panel_face = ranked[0]
+        if panel_face["identity"]["agreement"] <= 0:
+            log.warning("No reference agrees with any other on identity (too few "
+                        "detectable faces). Identity conditioning will be weak. "
+                        "The garment is unaffected: it comes from the source.")
 
-        g = groups[best_g]
-        # Panel 1: strongest identity/face view from the externals.
-        idw = sorted(g["members"], key=lambda m: -(m["face_frac"] or 0))
-        panel_face = idw[0] if idw else g["members"][0]
-        # Panel 3: a compatible alternate angle from the SAME cluster only.
-        alt = next((m for m in g["members"] if m is not panel_face), None)
+        # A second panel earns its place only by showing a DIFFERENT angle, and
+        # only if it is confidently the same person - an unverified photograph
+        # would be conditioning the model on a stranger's face.
+        MIN_AGREE = 0.45
+        others = [m for m in ranked[1:]
+                  if m["identity"]["agreement"] >= MIN_AGREE]
+        alt = (min(others, key=lambda m: float(np.dot(m["clip"], panel_face["clip"])))
+               if others else None)
+        if alt is not None:
+            log.info("alternate angle: %s (CLIP similarity to panel 1 %.3f, the "
+                     "most different view among %d verified reference(s))",
+                     alt["file"].name,
+                     float(np.dot(alt["clip"], panel_face["clip"])), len(others))
+        else:
+            log.info("No second reference cleared the identity bar (agreement "
+                     ">= %.2f); the pack uses one identity panel.", MIN_AGREE)
+        best_g = int(panel_face["cluster"])
+
+        # Diagnostic only: how far the chosen photographs' clothing is from what
+        # is actually worn in this interval. Recorded as evidence that the
+        # external clothing is incompatible - never as a reason to use it.
+        chosen_pal: dict = {}
+        for m in ([panel_face] + ([alt] if alt is not None else [])):
+            for k, v in m["palette"].items():
+                chosen_pal.setdefault(k, v)
+        shared = set(chosen_pal) & set(outfit["palette"])
+        best_d = (float(np.mean([delta_e(chosen_pal[k]["lab"],
+                                         outfit["palette"][k]["lab"])
+                                 for k in shared])) if shared else float("nan"))
+        same_look = best_d == best_d and best_d < args.outfit_deltae
+        log.info("Chosen references' garments are dE %.1f from this interval's "
+                 "(%s). Either way the garment comes from the source; this is a "
+                 "diagnostic, not a switch.",
+                 best_d if best_d == best_d else float("nan"),
+                 "similar" if same_look else "a different outfit"
+                 if best_d == best_d else "no shared garment class")
 
         pack = {
             "shot_id": sid,
             "cluster": best_g,
-            "cluster_size": len(g["members"]),
-            "garment_deltaE_to_source": (round(best_d, 2) if best_d == best_d
-                                         else None),
-            "outfit_authority": "external_photograph" if exact else "source_frames",
+            "clusters_found": len(groups),
+            "references_considered": len(items),
+            # Invariant, not a decision. The garment in this interval is the only
+            # record of what is being worn, so it is always the authority; the
+            # externals only ever contribute identity. Making this conditional on
+            # a colour distance meant a coincidentally similar photograph could
+            # promote itself to garment source, which is the failure being fixed.
+            "outfit_authority": "source_frames",
+            "identity_authority": "external_photographs",
+            "external_garment_similarity": {
+                "deltaE_to_source": (round(best_d, 2) if best_d == best_d
+                                     else None),
+                "threshold": args.outfit_deltae,
+                "looks_like_same_outfit": bool(same_look),
+                "note": "diagnostic only; does not affect where the garment "
+                        "comes from",
+            },
+            "identity_selection": panel_face["identity"],
             "source_palette": outfit["palette"],
             "panels": [
                 {"role": "identity_face_only", "provenance": panel_face["file"].name,
@@ -360,7 +491,9 @@ def main() -> int:
                  "upscaled": False,
                  "conditions": "face, hair and exposed skin only; clothing and "
                                "accessories segmented out",
-                 "face_fraction": round(float(panel_face["face_frac"] or 0), 4)},
+                 "face_fraction": round(float(panel_face["face_frac"] or 0), 4),
+                 "identity": panel_face["identity"],
+                 "cluster": panel_face["cluster"]},
                 {"role": "exact_outfit_body",
                  "provenance": f"source frame {outfit['best']['frame']} "
                                f"of this interval",
@@ -385,23 +518,19 @@ def main() -> int:
         # clothing is from another day; leaving it visible invites the model to
         # reproduce it, which is the fault being corrected. The SOURCE panel is
         # left whole - it is the only correct record of the current garment.
-        face_img, face_keep = mask_to_identity(panel_face["image"],
-                                               panel_face["labels"])
-        imgs = [face_img, Image.fromarray(outfit["best"]["crop"])]
-        pack["panels"][0]["clothing_removed"] = True
-        pack["panels"][0]["identity_pixels_kept"] = round(face_keep, 4)
-        if alt is not None:
-            alt_img, alt_keep = mask_to_identity(alt["image"], alt["labels"])
-            imgs.append(alt_img)
-            pack["panels"][2]["clothing_removed"] = True
-            pack["panels"][2]["identity_pixels_kept"] = round(alt_keep, 4)
-        low = [i for i, k in enumerate((face_keep,) + ((alt_keep,) if alt is not None
-                                                       else ())) if k < 0.05]
+        imgs, keeps = build_panel_images(panel_face, outfit["best"]["crop"], alt)
+        for i, k in enumerate(keeps):
+            if k is None:
+                continue
+            pack["panels"][i]["clothing_removed"] = True
+            pack["panels"][i]["identity_pixels_kept"] = round(k, 4)
+        low = [pack["panels"][i]["role"] for i, k in enumerate(keeps)
+               if k is not None and k < 0.05]
         if low:
             log.warning("%s: identity masking kept under 5%% of panel(s) %s. The "
                         "parser may have failed on those photographs; check the "
                         "pack sheet before trusting the identity conditioning.",
-                        sid, low)
+                        sid, ", ".join(low))
         for i, im in enumerate(imgs):
             k = min(pw / im.width, ph / im.height)
             # Only ever downscale to fit the panel. A 720p reference is adequate;
@@ -421,11 +550,15 @@ def main() -> int:
             {k: v for k, v in pack.items()}, indent=2, default=str) + "\n")
 
         shot = next(s for s in man["shots"] if s["shot_id"] == sid)
-        shot["reference_pack"] = {"sheet": pack["sheet"], "key": pack["key"],
-                                  "cluster": best_g,
-                                  "outfit_authority": pack["outfit_authority"]}
-        log.info("%s: pack -> %s (%d panels, outfit authority: %s)", sid,
-                 rel(sheet_path), n, pack["outfit_authority"])
+        shot["reference_pack"] = {
+            "sheet": pack["sheet"], "key": pack["key"], "cluster": best_g,
+            "outfit_authority": pack["outfit_authority"],
+            "identity_authority": pack["identity_authority"],
+            "identity_score": panel_face["identity"]["score"],
+            "external_garment_deltaE": pack["external_garment_similarity"][
+                "deltaE_to_source"]}
+        log.info("%s: pack -> %s (%d panels; identity from externals, garment "
+                 "from %s)", sid, rel(sheet_path), n, pack["outfit_authority"])
         made += 1
 
     save_manifest(man)

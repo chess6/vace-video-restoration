@@ -83,6 +83,35 @@ def record_run(c: dict, variant: str, **fields) -> None:
         c.update(fields)
 
 
+def needs_run(c: dict, variant: str, key: str) -> bool:
+    """Does this chunk still have to be generated for this variant?
+
+    Only a `done` record whose stored key still matches the conditioning on disk
+    counts as current. Anything else - pending, failed, or `stale` (see
+    `settled_status`) - has to run again. `skipped` means the shot has no subject
+    in it, so there is nothing to generate and assembly passes it through.
+    """
+    st = run_status(c, variant)
+    if st == "skipped":
+        return False
+    if st == "done":
+        return (c.get("runs", {}).get(variant) or {}).get("generation_key") != key
+    return True
+
+
+def settled_status(key_before: str, key_after: str) -> str:
+    """Status for a chunk that produced a file, given the conditioning key taken
+    before staging and the one taken after inference finished.
+
+    A chunk takes ~16 minutes. If a reference pack, mask or control is rebuilt in
+    that window, the pixels came from the OLD inputs while the key computed
+    afterwards describes the NEW ones - so recording the post-run key would mark
+    a stale result current and it would never be regenerated. The two keys are
+    compared instead, and any disagreement settles as `stale`.
+    """
+    return "done" if key_before == key_after else "stale"
+
+
 def ensure_source_chunk(man: dict, c: dict, log, force=False) -> Path:
     """Frame-exact slice of the normalized working stream for this chunk."""
     dst = (P.root / c["control_path"]).with_suffix(".mp4")
@@ -174,7 +203,10 @@ def main() -> int:
             log.error("No pilot chunks. Run scripts/extract_pilot.py first.")
             return 1
     elif args.resume_failed:
-        chunks = [c for c in chunks if run_status(c, variant) == "failed"]
+        # `stale` is included: it is a result that cannot be trusted, so leaving
+        # it out would mean a "retry everything broken" run quietly skips it.
+        chunks = [c for c in chunks
+                  if run_status(c, variant) in ("failed", "stale")]
     elif args.all:
         pass
     else:
@@ -253,23 +285,18 @@ def main() -> int:
         })
 
     if not args.redo:
-        # "skipped" means a shot with no subject in it: there is nothing to
-        # regenerate, and assembly passes the original frames through.
-        # A chunk only counts as done if its recorded key still matches: if the
-        # reference pack, a mask, a control or any setting changed, the stored
-        # output is stale and must not be reused.
         keep = []
         for c in chunks:
-            st = run_status(c, variant)
-            if st == "skipped":
+            key = gen_key(c)
+            if not needs_run(c, variant, key):
                 continue
-            if st == "done":
+            if run_status(c, variant) == "done":
                 prev = (c.get("runs", {}).get(variant) or {}).get("generation_key")
-                if prev == gen_key(c):
-                    continue
                 log.info("%s: conditioning changed since it was generated "
-                         "(key %s -> %s); regenerating.", c["chunk_id"],
-                         prev, gen_key(c))
+                         "(key %s -> %s); regenerating.", c["chunk_id"], prev, key)
+            elif run_status(c, variant) == "stale":
+                log.info("%s: previous result was recorded stale (its inputs "
+                         "changed mid-run); regenerating.", c["chunk_id"])
             keep.append(c)
         chunks = keep
     if args.limit:
@@ -317,7 +344,7 @@ def main() -> int:
              " and masks" if use_mask else "", len(chunks))
 
     P.restored_480p.mkdir(parents=True, exist_ok=True)
-    done = failed = 0
+    done = failed = stale = 0
     t_all = time.time()
     durations: list[float] = []
 
@@ -393,6 +420,14 @@ def main() -> int:
             # the tracked boundary.
             LOSSLESS = ["-c:v", "libx264", "-qp", "0", "-preset", "veryfast",
                         "-pix_fmt", "yuv420p"]
+            # The key that describes THESE pixels is taken here, immediately
+            # before the inputs are copied into ComfyUI - not after inference.
+            # Computing it afterwards reads whatever is on disk ~16 minutes
+            # later, so a pack rebuilt in the meantime would stamp the new key
+            # onto an output generated from the old one, and it would look
+            # current forever. It is re-read after the run and the two are
+            # compared; see settled_status().
+            key_before = gen_key(c)
             src_name = stage(src_chunk, f"chunk_source_{cid}.mp4")
             dep_mp4 = P.comfy_input / f"chunk_depth_{cid}.mp4"
             run(["ffmpeg", "-y", "-v", "error", "-i", str(depth), *LOSSLESS,
@@ -449,19 +484,30 @@ def main() -> int:
             dest = P.restored_480p / f"{cid}{suffix}.mp4"
             shutil.move(str(produced), dest)
 
-            record_run(c, variant, status="done", error="",
+            key_after = gen_key(c)
+            status = settled_status(key_before, key_after)
+            record_run(c, variant, status=status, error="",
                        duration_sec=round(dt, 2),
                        peak_vram_mb=hist.get("_peak_vram_mb", 0),
                        workflow=wf_name, use_mask=use_mask, use_reference=use_ref,
                        background_profile=args.background,
                        reference_image=rel(sheet_for(c)),
-                       generation_key=gen_key(c),
+                       generation_key=key_before,
+                       inputs_changed_during_run=(key_after if status == "stale"
+                                                  else None),
                        seed=args.seed if args.seed is not None else c["seed"],
                        output_path=rel(dest))
             save_manifest(man)
-            done += 1
-            log.info("done in %s (%.2f s/frame, peak VRAM %s MiB) -> %s",
-                     human_time(dt), dt / c["n_frames"],
+            if status == "stale":
+                stale += 1
+                log.warning("%s: its conditioning changed WHILE it was generating "
+                            "(%s -> %s). The file was kept for inspection but is "
+                            "recorded stale and will regenerate; do not compare "
+                            "it against anything.", cid, key_before, key_after)
+            else:
+                done += 1
+            log.info("%s in %s (%.2f s/frame, peak VRAM %s MiB) -> %s",
+                     status, human_time(dt), dt / c["n_frames"],
                      hist.get("_peak_vram_mb", 0), dest.name)
 
             eta = (len(chunks) - i - 1) * (sum(durations) / len(durations))
@@ -480,16 +526,17 @@ def main() -> int:
                     fp.unlink()
 
     log.info("=" * 62)
-    log.info("Finished: %d done, %d failed, in %s", done, failed,
+    log.info("Finished: %d done, %d stale, %d failed, in %s", done, stale, failed,
              human_time(time.time() - t_all))
     if durations:
         avg = sum(durations) / len(durations)
         fpc = chunks[0]["n_frames"]
         log.info("Average %s per chunk (%.2f s per generated frame)",
                  human_time(avg), avg / fpc)
-    if failed:
-        log.warning("Retry just the failures with: scripts/run_chunks.py --resume-failed")
-    return 0 if failed == 0 else 1
+    if failed or stale:
+        log.warning("Retry the failed and stale chunks with: "
+                    "scripts/run_chunks.py --resume-failed")
+    return 0 if (failed == 0 and stale == 0) else 1
 
 
 if __name__ == "__main__":

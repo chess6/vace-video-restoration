@@ -132,6 +132,28 @@ hits=$(tracked | grep -E '^reports/(source_info|tracking_report|assembly|upscale
 if [ -n "$hits" ]; then echo "$hits" | sed 's/^/  VIOLATION: /'; rc=1; else echo "  OK"; fi
 
 echo
+echo "=== 5. docs/STATE.md is present and within its size limit ==="
+# A working memory that grows without bound stops being read, which defeats its
+# purpose. The cap is deliberately small: anything now enforced by a test or a
+# guard belongs in that test, and history belongs in git.
+STATE=docs/STATE.md
+MAX_LINES=200
+MAX_BYTES=12288
+if [ ! -f "$STATE" ]; then
+  echo "  VIOLATION: $STATE is missing (CLAUDE.md rule 0 points every session at it)"
+  rc=1
+else
+  L=$(wc -l < "$STATE"); B=$(wc -c < "$STATE")
+  if [ "$L" -gt "$MAX_LINES" ] || [ "$B" -gt "$MAX_BYTES" ]; then
+    echo "  VIOLATION: $STATE is ${L} lines / ${B} bytes (limit ${MAX_LINES} / ${MAX_BYTES})."
+    echo "             Delete the oldest resolved entries; git history keeps them."
+    rc=1
+  else
+    echo "  OK: ${L}/${MAX_LINES} lines, ${B}/${MAX_BYTES} bytes"
+  fi
+fi
+
+echo
 echo "=== tracked file count: $(tracked | wc -l) ==="
 if [ $rc -eq 0 ]; then echo "REPO CLEAN CHECK: PASSED — safe to push"
 else echo "REPO CLEAN CHECK: FAILED — do NOT push"; fi

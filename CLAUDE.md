@@ -4,6 +4,30 @@ Binding rules for any agent or human working in this repository.
 
 ---
 
+## 0. Read `docs/STATE.md` before doing anything, and keep it current
+
+`docs/STATE.md` is this project's durable memory: the architecture's authority
+split, the model facts read from the installed source, the provenance and
+staleness contract, the measurement mistakes that have already produced wrong
+conclusions once, and the user's standing instructions.
+
+**At the start of any session or task in this repository, read it first.** These
+rules say what is forbidden; that file says what is already known. Rediscovering
+it costs GPU hours, and re-deriving it from memory has produced wrong answers.
+
+**Update it when a durable fact changes** — a new invariant, a corrected
+architecture decision, a measurement trap, a standing instruction from the user.
+Do not log routine progress there: task status belongs in the task list and
+history belongs in git.
+
+It is capped at **200 lines / 12 KB**, enforced by `scripts/check_repo_clean.sh`.
+When it is full, delete the oldest resolved entries rather than raising the cap —
+a working memory nobody finishes reading is not one. Anything now enforced by a
+test or a guard script belongs in that test, not in the document.
+
+Rule 2a applies to it in full: it is tracked, so it must never name an input
+file, a person, or any interval, duration or resolution of the user's media.
+
 ## 1. NEVER display media on the user's screen — no exceptions
 
 No image, video, frame, mask, contact sheet, reference sheet, comparison grid or
