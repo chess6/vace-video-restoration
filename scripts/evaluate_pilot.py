@@ -40,6 +40,23 @@ Metrics, and what each is evidence for:
   chunk_boundary_jump    frame-to-frame difference at chunk seams vs the median
                          elsewhere. >1 means a visible seam.
 
+Garment fidelity is measured against the SOURCE interval, never against the
+reference photographs - they show a different outfit, so agreeing with them
+would be the failure, not the goal. The brief pulls in two directions and the
+metrics are kept apart accordingly:
+
+  garment_deltaE         colour distance from the source palette
+  garment_temporal_dE    how much that colour crawls between frames
+  garment_iou            silhouette overlap with the source's parsed garment
+  garment_boundary_f     edge agreement at 2 px, which IoU is too blunt to see
+  garment_lowfreq_drift  blurred difference inside the garment. Must stay SMALL:
+                         this is the structure that was supposed to survive.
+  garment_hf_gain        high-frequency energy vs the source. Should be ABOVE 1:
+                         this is the texture the restoration exists to add.
+  garment_pattern_chi2   gradient-orientation histogram distance - a changed
+                         weave or print rather than a sharper one
+  accessories_*          accessory classes invented or dropped, by name
+
     scripts/evaluate_pilot.py --report reports/pilot_metrics.json
 """
 from __future__ import annotations
@@ -247,6 +264,180 @@ def garment_metrics(path: Path, mask_path: Path, source_palette: dict,
             "outfit_mutation": bool(np.max(drift) > 10.0)}
 
 
+ACCESSORY = {"hat", "bag", "belt", "scarf", "left_shoe", "right_shoe"}
+
+
+def _probe_pairs(var_path: Path, src_path: Path, mask_path: Path, n_probe: int):
+    """Frame-aligned (source crop, variant crop) pairs around the subject.
+
+    Both are cropped with the SAME box from the same mask, so the two label maps
+    that come out of the parser are directly comparable pixel for pixel. Nothing
+    is resampled: a resize here would blur exactly the boundary being measured.
+    """
+    import cv2
+    cap, vcap = cv2.VideoCapture(str(src_path)), cv2.VideoCapture(str(var_path))
+    src, var, msk = [], [], []
+    mcap = cv2.VideoCapture(str(mask_path))
+    while True:
+        oks, s = cap.read()
+        okv, v = vcap.read()
+        okm, m = mcap.read()
+        if not (oks and okv and okm):
+            break
+        src.append(s); var.append(v); msk.append(cv2.cvtColor(m, cv2.COLOR_BGR2GRAY) > 127)
+    for c in (cap, vcap, mcap):
+        c.release()
+    if not src:
+        return []
+    idx = np.linspace(0, len(src) - 1, min(n_probe, len(src))).astype(int)
+    out = []
+    for i in idx:
+        if msk[i].sum() < 64 or src[i].shape != var[i].shape:
+            continue
+        ys, xs = np.where(msk[i])
+        y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+        if y1 - y0 < 32 or x1 - x0 < 16:
+            continue
+        out.append((int(i),
+                    cv2.cvtColor(src[i][y0:y1, x0:x1], cv2.COLOR_BGR2RGB),
+                    cv2.cvtColor(var[i][y0:y1, x0:x1], cv2.COLOR_BGR2RGB)))
+    return out
+
+
+def _boundary_f(a: np.ndarray, b: np.ndarray, tol: int = 2) -> float:
+    """Symmetric boundary F-score at a `tol` pixel tolerance.
+
+    Region IoU is dominated by the interior and barely moves when an edge slides
+    a few pixels, which is precisely the failure that reads as a redrawn garment.
+    This measures the edges themselves.
+    """
+    import cv2
+    k = np.ones((3, 3), np.uint8)
+    ea = (cv2.morphologyEx(a.astype(np.uint8), cv2.MORPH_GRADIENT, k) > 0)
+    eb = (cv2.morphologyEx(b.astype(np.uint8), cv2.MORPH_GRADIENT, k) > 0)
+    if not ea.any() or not eb.any():
+        return float("nan")
+    da = cv2.distanceTransform((~ea).astype(np.uint8), cv2.DIST_L2, 3)
+    db = cv2.distanceTransform((~eb).astype(np.uint8), cv2.DIST_L2, 3)
+    prec = float((db[ea] <= tol).mean())      # source edge explained by variant
+    rec = float((da[eb] <= tol).mean())       # variant edge justified by source
+    return 0.0 if prec + rec == 0 else 2 * prec * rec / (prec + rec)
+
+
+def _orient_hist(gray: np.ndarray, region: np.ndarray, bins: int = 16):
+    """Magnitude-weighted gradient orientation histogram - a cheap, resolution
+    tolerant description of pattern (stripes, print, weave direction)."""
+    import cv2
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.sqrt(gx * gx + gy * gy)[region]
+    ang = (np.arctan2(gy, gx)[region] % np.pi) / np.pi * bins
+    h = np.bincount(np.clip(ang.astype(int), 0, bins - 1), weights=mag,
+                    minlength=bins).astype(np.float64)
+    return h / max(1e-6, h.sum())
+
+
+def garment_structure(var_path: Path, src_path: Path, mask_path: Path,
+                      n_probe: int, log) -> dict:
+    """Everything about the garment that colour alone cannot catch.
+
+    The brief for this restoration is specific: keep the source's low-frequency
+    colour and structure, and add only the missing high-frequency texture. That
+    is two measurements pulling in opposite directions, so they are reported
+    separately rather than fused into one score.
+
+      garment_iou           overlap of the parsed garment region with the
+                            source's. Low = the model redrew the silhouette.
+      garment_boundary_f    edge agreement at 2 px. Catches an edge that slid
+                            while the region stayed roughly the same size.
+      garment_lowfreq_drift mean |variant - source| inside the garment after
+                            heavy blur. This must stay SMALL: it is the
+                            structure and colour that were supposed to survive.
+      garment_hf_gain       high-frequency energy vs the source inside the
+                            garment. This should be ABOVE 1: it is the texture
+                            the restoration exists to add. Below 1 means the
+                            pass smoothed the clothes instead of restoring them.
+      garment_pattern_chi2  distance between gradient-orientation histograms.
+                            Large = the weave or print changed direction, which
+                            is a different fabric rather than a sharper one.
+      accessories_*         accessory classes invented or dropped, by name. An
+                            invented bag is not a texture detail.
+    """
+    import cv2
+    from PIL import Image
+    from make_reference_pack import LBL, GARMENT, Parser
+
+    pairs = _probe_pairs(var_path, src_path, mask_path, n_probe)
+    if not pairs:
+        return {}
+    parser = Parser(log)
+    gids = [i for i, n in LBL.items() if n in GARMENT]
+
+    ious, bfs, lows, hfs, chis = [], [], [], [], []
+    per_class: dict[str, list] = {}
+    invented: dict[str, int] = {}
+    dropped: dict[str, int] = {}
+    for _, s_rgb, v_rgb in pairs:
+        ls = parser.parse(Image.fromarray(s_rgb))
+        lv = parser.parse(Image.fromarray(v_rgb))
+        gs, gv = np.isin(ls, gids), np.isin(lv, gids)
+        if not gs.any():
+            continue
+        union = int((gs | gv).sum())
+        ious.append(int((gs & gv).sum()) / max(1, union))
+        bfs.append(_boundary_f(gs, gv))
+
+        for idx, name in LBL.items():
+            if name not in GARMENT:
+                continue
+            a, b = (ls == idx), (lv == idx)
+            if a.any() or b.any():
+                per_class.setdefault(name, []).append(
+                    int((a & b).sum()) / max(1, int((a | b).sum())))
+            if name in ACCESSORY:
+                # Judged by pixel share, not presence: a stray dozen pixels from
+                # the parser is not an invented handbag.
+                sa, sb = a.mean(), b.mean()
+                if sb > 0.01 and sa < 0.002:
+                    invented[name] = invented.get(name, 0) + 1
+                elif sa > 0.01 and sb < 0.002:
+                    dropped[name] = dropped.get(name, 0) + 1
+
+        sg = cv2.cvtColor(s_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        vg = cv2.cvtColor(v_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        lo_s = cv2.GaussianBlur(sg, (0, 0), 4.0)
+        lo_v = cv2.GaussianBlur(vg, (0, 0), 4.0)
+        lows.append(float(np.mean(np.abs(lo_v - lo_s)[gs])))
+        hs = float(cv2.Laplacian(sg, cv2.CV_32F)[gs].var())
+        hv = float(cv2.Laplacian(vg, cv2.CV_32F)[gs].var())
+        hfs.append(hv / max(1e-6, hs))
+        ha, hb = _orient_hist(sg, gs), _orient_hist(vg, gs)
+        chis.append(float(0.5 * np.sum((ha - hb) ** 2 / (ha + hb + 1e-9))))
+
+    if not ious:
+        return {}
+    valid_bf = [b for b in bfs if b == b]
+    out = {
+        "garment_frames_probed": len(ious),
+        "garment_iou": round(float(np.median(ious)), 4),
+        "garment_boundary_f": (round(float(np.median(valid_bf)), 4)
+                               if valid_bf else None),
+        "garment_lowfreq_drift": round(float(np.median(lows)), 2),
+        "garment_hf_gain": round(float(np.median(hfs)), 3),
+        "garment_pattern_chi2": round(float(np.median(chis)), 4),
+        "garment_class_iou": {k: round(float(np.median(v)), 4)
+                              for k, v in sorted(per_class.items())},
+        "accessories_invented": invented,
+        "accessories_dropped": dropped,
+    }
+    # The two directions of the brief, stated as one boolean each so a report
+    # cannot quietly average them into "fine".
+    out["structure_preserved"] = bool(out["garment_iou"] > 0.75
+                                      and out["garment_lowfreq_drift"] < 8.0)
+    out["texture_restored"] = bool(out["garment_hf_gain"] > 1.0)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -315,7 +506,14 @@ def main() -> int:
                 m.update(garment_metrics(path, mask_path, source_palette,
                                          args.garment_frames, log))
             except Exception as e:
-                log.warning("%s: garment metrics unavailable (%s)", name, e)
+                log.warning("%s: garment colour metrics unavailable (%s)", name, e)
+        if not args.no_garment and mask_path.exists():
+            try:
+                m.update(garment_structure(path, P.root / spec["source"],
+                                           mask_path, args.garment_frames, log))
+            except Exception as e:
+                log.warning("%s: garment structure metrics unavailable (%s)",
+                            name, e)
         m["path"] = rel(path)
         m["describes"] = entry.get("describes", "")
         out[name] = m
@@ -329,6 +527,19 @@ def main() -> int:
                  f"  plate_drift={m['bg_drift_vs_plate']:.2f} "
                  f"within2={m['bg_preserved_within_2']:.3f}"
                  if m.get("bg_drift_vs_plate") is not None else "")
+        if m.get("garment_iou") is not None:
+            log.info("%-28s garment: iou=%.3f boundaryF=%s lowfreq=%.1f "
+                     "hf_gain=%.2f pattern=%.3f  -> structure %s, texture %s%s",
+                     "", m["garment_iou"],
+                     ("%.3f" % m["garment_boundary_f"]
+                      if m.get("garment_boundary_f") is not None else "n/a"),
+                     m["garment_lowfreq_drift"], m["garment_hf_gain"],
+                     m["garment_pattern_chi2"],
+                     "PRESERVED" if m["structure_preserved"] else "MOVED",
+                     "RESTORED" if m["texture_restored"] else "LOST",
+                     ("  accessories invented: "
+                      + ", ".join(m["accessories_invented"])
+                      if m.get("accessories_invented") else ""))
 
     rp = args.report or (P.reports / "pilot_metrics.json")
     rp.parent.mkdir(parents=True, exist_ok=True)
