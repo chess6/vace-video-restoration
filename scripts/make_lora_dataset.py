@@ -98,40 +98,69 @@ def main() -> int:
     # Rank by consensus agreement so the split can be spread across it rather
     # than reserving the best or the worst images.
     ranked = sorted(per.values(), key=lambda v: -float(v.get("agreement") or 0.0))
-    n_hold = max(0, min(args.holdout, len(ranked) - 1))
-    # every k-th, offset to avoid taking the single strongest image
-    hold_idx = set()
-    if n_hold:
-        step = max(1, len(ranked) // (n_hold + 1))
-        hold_idx = {min(len(ranked) - 1, (i + 1) * step) for i in range(n_hold)}
 
     out_dir = args.out or (P.intermediate / "lora_dataset")
-    (out_dir / "train").mkdir(parents=True, exist_ok=True)
-    (out_dir / "holdout").mkdir(parents=True, exist_ok=True)
+    # Clear previous crops. Names carry the rank index, so a re-run with a
+    # different --min-px or holdout leaves the old ones behind under different
+    # names and the trainer, which globs the directory, would train on both -
+    # the same face twice at different crops, silently double-weighted.
+    for split in ("train", "holdout"):
+        d = out_dir / split
+        d.mkdir(parents=True, exist_ok=True)
+        for old in list(d.glob("*.png")) + list(d.glob("*.txt")):
+            old.unlink()
 
     manifest = {"train": [], "holdout": [], "rejected": [],
                 "margin": args.margin, "trigger": args.trigger,
                 "source": "identity.resolve_targets + exclusions",
                 "note": "head crops, not greyed panels: a flat grey field would "
                         "be learned as background"}
-    for i, v in enumerate(ranked):
+
+    # Crop first, split second. Splitting over the ranking BEFORE cropping spends
+    # holdout slots on images the crop filter then rejects: on the first real run
+    # two of three reserved images fell below --min-px and the evaluation set
+    # arrived with one image in it. Only images that survive the crop can be
+    # reserved, so the ranking that matters is the surviving one.
+    kept = []
+    for v in ranked:
         f = Path(v["file"])
-        split = "holdout" if i in hold_idx else "train"
         try:
             im = ImageOps.exif_transpose(Image.open(f)).convert("RGB")
         except Exception as e:
             manifest["rejected"].append({"file": f.name, "why": str(e)})
+            log.info("%-34s rejected: %s", f.name, e)
             continue
         crop = crop_head(im, v["instance"]["box"], args.margin, args.min_px)
         if crop is None:
+            # Report the size it would have had: the floor is a judgement call and
+            # "rejected" alone gives no way to tell a near miss from a thumbnail.
+            full = crop_head(im, v["instance"]["box"], args.margin, 0)
+            got = f"{min(full.size)}px" if full is not None else "empty"
             manifest["rejected"].append(
-                {"file": f.name, "why": f"crop below {args.min_px}px"})
-            log.info("%-34s rejected: crop below %dpx", f.name, args.min_px)
+                {"file": f.name, "why": f"crop {got}, below --min-px {args.min_px}",
+                 "short_edge_px": min(full.size) if full is not None else 0})
+            log.info("%-34s rejected: crop %s, below --min-px %d",
+                     f.name, got, args.min_px)
             continue
         if max(crop.size) > args.max_px:
             s = args.max_px / max(crop.size)
             crop = crop.resize((round(crop.width * s), round(crop.height * s)),
                                Image.LANCZOS)
+        kept.append((v, f, crop))
+
+    n_hold = max(0, min(args.holdout, len(kept) - 1))
+    # every k-th, offset to avoid taking the single strongest image
+    hold_idx = set()
+    if n_hold:
+        step = max(1, len(kept) // (n_hold + 1))
+        hold_idx = {min(len(kept) - 1, (i + 1) * step) for i in range(n_hold)}
+    if n_hold and len(hold_idx) < args.holdout:
+        log.warning("Asked for %d held-out image(s), reserving %d: only %d "
+                    "image(s) survived cropping.", args.holdout, len(hold_idx),
+                    len(kept))
+
+    for i, (v, f, crop) in enumerate(kept):
+        split = "holdout" if i in hold_idx else "train"
         dst = out_dir / split / f"{i:02d}_{f.stem}.png"
         crop.save(dst)
         if args.trigger:
