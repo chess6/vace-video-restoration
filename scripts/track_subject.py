@@ -554,8 +554,19 @@ def write_contact_sheet(frames_dir: Path, masks: np.ndarray, out: Path,
     """Overlay grid for review. Written to disk only; never displayed."""
     from PIL import Image
     import cv2
-    idxs = title_frames or list(np.linspace(0, len(masks) - 1, 12).astype(int))
-    idxs = sorted(set(int(i) for i in idxs if 0 <= i < len(masks)))[:12]
+    # Always sample the whole shot, then add the notable frames on top of that.
+    # This used to be `title_frames or <spaced>`, so any non-empty title_frames
+    # suppressed the spread entirely - and title_frames is never empty, because
+    # the seed frame is always prepended. A shot with no events therefore got a
+    # ONE-frame review sheet: the reviewer saw a single moment out of the whole
+    # shot at exactly the point where the whole shot is what needs judging.
+    n = len(masks)
+    want = [int(i) for i in (title_frames or []) if 0 <= i < n]
+    for i in np.linspace(0, n - 1, 12).astype(int):
+        if len(set(want)) >= 12:
+            break
+        want.append(int(i))
+    idxs = sorted(set(want))[:12]
     tiles = []
     for i in idxs:
         f = frames_dir / f"{i:05d}.jpg"
@@ -572,8 +583,16 @@ def write_contact_sheet(frames_dir: Path, masks: np.ndarray, out: Path,
                     (255, 255, 0), 1, cv2.LINE_AA)
         tiles.append(Image.fromarray(im))
     if not tiles:
+        log.warning("%s: no extracted frames available, no review sheet written",
+                    out.name)
         return
-    cols = 4
+    if len(tiles) < len(idxs):
+        # Silence here once produced a sheet that looked like a rendering fault.
+        log.warning("%s: only %d of %d requested frames were on disk; the sheet "
+                    "covers less of the shot than it should", out.name,
+                    len(tiles), len(idxs))
+    # Never pad the grid with empty cells: a blank tile reads as a broken render.
+    cols = min(4, len(tiles))
     rows = (len(tiles) + cols - 1) // cols
     tw = 320
     th = int(tw * tiles[0].height / tiles[0].width)
