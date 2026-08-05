@@ -66,6 +66,30 @@ def sharpness(frames: np.ndarray, idx, box=None) -> float:
     return float(np.median(vals))
 
 
+def chroma_hf_in_mask(frames: np.ndarray, masks: np.ndarray, idx) -> float | None:
+    """High-frequency energy in the COLOUR channels, over the mask's pixels.
+
+    Luma sharpness and this number move together when a restoration is working
+    and apart when it is inventing: coloured static raises chroma HF while
+    leaving structure alone, and the 7B pass is already known to carry ~3x the
+    chroma noise of 3B. Reporting sharpness without it is how a noisier output
+    wins a comparison it should lose - which is the likeliest explanation for a
+    stream that measures sharper and looks worse.
+    """
+    import cv2
+    vals = []
+    for i in idx:
+        if i >= len(masks):
+            break
+        m = masks[i]
+        if m.sum() < 64:
+            continue
+        ycc = cv2.cvtColor(frames[i], cv2.COLOR_BGR2YCrCb).astype(np.float32)
+        e = [cv2.Laplacian(ycc[:, :, c], cv2.CV_32F)[m].var() for c in (1, 2)]
+        vals.append(float(np.mean(e)))
+    return float(np.median(vals)) if vals else None
+
+
 def label_bar(width: int, text: str, height: int = 28) -> np.ndarray:
     import cv2
     bar = np.zeros((height, width, 3), np.uint8)
@@ -199,13 +223,15 @@ def main() -> int:
     b_full = sharpness(base, idx)
     b_crop = sharpness(base, idx, box) if box else None
     b_in = sharpness_in_mask(base, masks, idx) if masks is not None else None
-    log.info("=" * 78)
-    log.info("%-22s %8s %9s %8s %9s %8s %9s", "stream", "frame", "vs base",
-             "box", "vs base", "in-mask", "vs base")
+    b_ch = chroma_hf_in_mask(base, masks, idx) if masks is not None else None
+    log.info("=" * 86)
+    log.info("%-22s %8s %9s %8s %9s %9s %9s", "stream", "frame", "vs base",
+             "in-mask", "vs base", "chroma", "vs base")
     for lab, path, fr in loaded:
         f_full = sharpness(fr[:n], idx)
         f_crop = sharpness(fr[:n], idx, box) if box else None
         f_in = sharpness_in_mask(fr[:n], masks, idx) if masks is not None else None
+        f_ch = chroma_hf_in_mask(fr[:n], masks, idx) if masks is not None else None
         stats[lab] = {"frame_sharpness": round(f_full, 2),
                       "frame_vs_baseline_pct": round(100 * (f_full / b_full - 1), 1),
                       "box_sharpness": round(f_crop, 2) if f_crop else None,
@@ -214,19 +240,21 @@ def main() -> int:
                       "in_mask_sharpness": round(f_in, 2) if f_in else None,
                       "in_mask_vs_baseline_pct":
                           round(100 * (f_in / b_in - 1), 1) if f_in and b_in else None,
+                      "in_mask_chroma_hf": round(f_ch, 2) if f_ch else None,
+                      "chroma_vs_baseline_pct":
+                          round(100 * (f_ch / b_ch - 1), 1) if f_ch and b_ch else None,
                       "source": str(path)}
-        log.info("%-22s %8.1f %+8.1f%% %8s %9s %8s %9s", lab, f_full,
+        log.info("%-22s %8.1f %+8.1f%% %8s %9s %9s %9s", lab, f_full,
                  100 * (f_full / b_full - 1),
-                 f"{f_crop:.1f}" if f_crop else "-",
-                 f"{100 * (f_crop / b_crop - 1):+.1f}%" if f_crop else "-",
                  f"{f_in:.1f}" if f_in else "-",
-                 f"{100 * (f_in / b_in - 1):+.1f}%" if f_in and b_in else "-")
-    log.info("=" * 78)
-    log.info("`in-mask` is the only column that sees what was regenerated. The "
-             "box around a head is mostly not the head, so `box` still reports "
-             "pixels the plate supplied.")
-    log.info("Sharpness is a proxy. Ringing and noise raise it too; the clips "
-             "are the evidence, these are the check.")
+                 f"{100 * (f_in / b_in - 1):+.1f}%" if f_in and b_in else "-",
+                 f"{f_ch:.2f}" if f_ch else "-",
+                 f"{100 * (f_ch / b_ch - 1):+.1f}%" if f_ch and b_ch else "-")
+    log.info("=" * 86)
+    log.info("`in-mask` is the only column that sees what was regenerated. A box "
+             "around a head is mostly not the head and reports the plate's work.")
+    log.info("Read `chroma` beside it: coloured static raises sharpness without "
+             "adding structure, and is how a noisier output wins on a proxy.")
 
     # ---- 2-up videos, native resolution, no scaling -------------------------
     h, w = base.shape[1], base.shape[2]
