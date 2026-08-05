@@ -159,9 +159,18 @@ the source it has to beat, with the plate as the reference point.
 | stream | sharpness | vs source |
 |---|---|---|
 | source, unrestored | 15.2 | — |
-| **SeedVR2 plate, aggressive** | **50.3** | **+231%** |
-| VACE on the plate (loraD / loraE) | 40.6 / 40.7 | +167% |
+| **plate registered as `background_aggressive`** | **50.3** | **+231%** |
+| VACE on that plate (loraD / loraE) | 40.6 / 40.7 | +167% |
 | VACE with no plate (loraA / loraB) | 14.4 / 14.5 | **−5.6% / −4.9%** |
+
+**That plate is the 7B pass, not 3B.** Verified after the fact: inside the review
+bundle it is byte-identical to the clip an earlier session named
+`plate_7B_aggressive_720p`. The manifest's background key records the **profile
+name, not the model** — 7B is selectable at run time — so `background_aggressive`
+does not tell you which checkpoint produced those pixels, and +231% here is a 7B
+number that carries 7B's ~3x chroma noise. The 3B plate for this chunk is a
+different hash under the same profile directory and was not what these arms sat
+on. None of this touches the LoRA comparison, where both arms share one plate.
 
 Two things fall out. The plate-free arms are *softer than the source* — the
 first batch did not merely fail to improve the shot, it slightly degraded it,

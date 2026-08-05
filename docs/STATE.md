@@ -87,18 +87,19 @@ Numbers in `reports/pilot_results.md` and `reports/lora_results.md`. Always scor
 identity through `identity.resolve_targets`, never `evaluate_pilot.py`'s own.
 
 - **The plate beat every VACE variant** (all under the 0.35 identity threshold).
-  **Aggressive SeedVR2 is the main lever**: sharpness 15.2 source → 50.3 plate,
-  and VACE on that plate hands a third of it back at 40.6. 7B adds +57.3% luma
-  detail but ~3x the chroma noise.
+  **Aggressive SeedVR2 is the main lever**: sharpness 15.2 source → 50.3 plate
+  (that one is the **7B** pass), and VACE on it hands a third back at 40.6. 7B
+  adds +57.3% luma detail but ~3x the chroma noise.
+- A `background` key names the **profile, not the model**: 7B is selectable at
+  run time, so identical keys can hold different checkpoints' pixels. Check.
 - **Reference conditioning did not improve it.** Removing the sheet moved the
   face 6.6/255; swapping whole-photo for identity-only, 1.89 — presence mattered
   more than content.
 - **A subject LoRA learns the face and still changes nothing here.** 0.023 →
-  **0.5167** trained (ceiling 0.7454, real photographs), yet matched pipeline
-  arms give 0.1682 without vs 0.1612 with, 0.1263 at double strength, and on the
-  plate 0.2015 without vs 0.1769 with. Doubling the one free parameter makes it
-  conclusive: **the protected path has no room for an identity prior** (4.42% of
-  the figure, pinned by control).
+  **0.5167** trained (ceiling 0.7454, real photographs), yet matched arms give
+  0.1682 without vs 0.1612 with, 0.1263 at double strength, and on the plate
+  0.2015 vs 0.1769. Doubling the one free parameter makes it conclusive: **the
+  protected path has no room for an identity prior** (4.42% of the figure).
 - Score a LoRA **only** against the held-out split (the training bank tracks it
   closely, which makes it dangerous); its trigger token is load-bearing; musubi's
   merge trap is in `prepare_musubi_dit.py`.
