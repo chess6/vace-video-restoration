@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Download the SeedVR2 background-restoration model into ComfyUI's model dirs.
 #
-# 3B in fp8 ONLY. The 7B model is deliberately not downloaded: it does not fit
-# this 12 GB card at 480p video length, and a run that silently swaps to CPU or
-# thrashes is worse than one that never starts (CLAUDE.md rule 3).
+# 3B in fp8 by default. 7B is opt-in via --7b, because it does not fit a 12 GB
+# card at video length and a run that silently swaps to CPU or thrashes is worse
+# than one that never starts (CLAUDE.md rule 3). On a 24 GB+ card it is the
+# largest untested quality lever: the 3B plate peaked at 12.7 GB, and the plate
+# stage is the one producing essentially all of this pipeline's measured gain.
+#
+# Two 7B fp8 variants exist and are the same size. `sharp` is a distinct release,
+# not a setting - worth comparing, since unresolved fine facial detail is the
+# open complaint about the 3B plate.
 #
 # Same contract as download_models.sh: SHA256 from the Hugging Face API, hard
 # failure on mismatch, resumable, skips files already verified.
@@ -27,6 +33,20 @@ FILES=(
 "diffusion_models|seedvr2_3b_fp8_e4m3fn.safetensors|diffusion_models/seedvr2_3b_fp8_e4m3fn.safetensors|a0226eaa2c3e6f47ae5ce83225120f16479da890ced1a3bc32b1a14619787914|3392794232"
 "vae|seedvr2_ema_vae_fp16.safetensors|vae/seedvr2_ema_vae_fp16.safetensors|20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1|501324814"
 )
+
+# Opt-in with --7b. Sizes and SHA256 read from the Hugging Face API, not guessed.
+FILES_7B=(
+"diffusion_models|seedvr2_7b_fp8_e4m3fn.safetensors|diffusion_models/seedvr2_7b_fp8_e4m3fn.safetensors|5065e77d647dd553d9090a81e20d6de590d931a61df79d785e008433926ee418|8240979248"
+"diffusion_models|seedvr2_7b_sharp_fp8_e4m3fn.safetensors|diffusion_models/seedvr2_7b_sharp_fp8_e4m3fn.safetensors|7602c5f70868d28e7730035e4e9d745b05d661c8f0a7eb758e63f9c8603596ef|8240979248"
+)
+
+for a in "$@"; do
+  case "$a" in
+    --7b) FILES+=("${FILES_7B[@]}") ;;
+    -h|--help) sed -n "2,20p" "$0"; exit 0 ;;
+    *) echo "Unknown option: $a" >&2; exit 2 ;;
+  esac
+done
 
 rc=0
 for entry in "${FILES[@]}"; do

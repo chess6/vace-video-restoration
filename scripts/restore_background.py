@@ -135,12 +135,19 @@ def main() -> int:
     ap.add_argument("--only", nargs="*", default=None, help="Limit to these chunk ids")
     ap.add_argument("--pilot", action="store_true", help="Only chunks tagged is_pilot")
     ap.add_argument("--force", action="store_true", help="Ignore the cache")
+    ap.add_argument("--model", default=None,
+                    help="Override background.model, e.g. a 7B checkpoint. The "
+                         "model name is part of the cache hash, so a different "
+                         "model rebuilds rather than silently reusing a plate "
+                         "built by another one.")
     ap.add_argument("--timeout", type=float, default=5400)
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
     log = setup_logging("restore_background", args.verbose)
     cfg = load_config(args.config)
+    if args.model:
+        cfg["background"]["model"] = args.model
     man = load_manifest()
     b = cfg.get("background", {})
     if not b.get("enabled"):
