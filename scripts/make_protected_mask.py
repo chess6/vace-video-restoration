@@ -145,7 +145,14 @@ def main() -> int:
         for i in range(n):
             lo, hi = max(0, i - half), min(n, i + half + 1)
             persist[i] = arr[lo:hi].mean(axis=0)
-        final = persist >= PERSIST
+        # AND with the current frame. The window is a plain temporal mean with no
+        # motion compensation, so a neighbouring frame vouches for a pixel at its
+        # own coordinates, not at this frame's. Without this intersection a
+        # region exposed in the neighbours but covered *now* is opened for
+        # regeneration over clothing that is present in this very frame - the
+        # exact failure the authority split exists to prevent. Persistence may
+        # only ever withdraw permission, never grant it.
+        final = (persist >= PERSIST) & (arr > 0.5)
 
         h, w = final[0].shape
         dst = out_dir / f"{sid}_protected.mkv"

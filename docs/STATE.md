@@ -87,17 +87,20 @@ Enforced by `scripts/test_reference_pack.py`.
 
 ## What the 1.3B pilot settled — do not re-run these
 
-Numbers in `reports/pilot_results.md`.
+Numbers in `reports/pilot_results.md`. Score identity with
+`identity.resolve_targets`, never `evaluate_pilot.py`.
 
-- **Reference conditioning is inert at 1.3B.** Removing the sheet moves the face
-  6.6/255; swapping whole-photo for identity-only moves it 1.89. The model reads
-  a reference's *presence*, not its content — better references, generated or
-  otherwise, cannot pay. Only model capacity is untested.
-- **The plate alone beats every VACE variant**, on gradient and on ArcFace
-  identity (all variants under the 0.35 same-face threshold).
-- **The aggressive SeedVR2 profile is the main lever**: +36.9% vs +20.8%, ~45 s.
-- Composite in `gbrp`, never `yuv420p`; after `--protected` pass `--mask` the
+- **Reference-conditioned VACE 1.3B did not improve this pilot.** Removing the
+  sheet moved the face 6.6/255; swapping whole-photo for identity-only moved it
+  1.89 — on this shot and seed the model read a reference's *presence* more than
+  its content. Not established beyond this pilot.
+- **The plate beat every VACE variant here** (all under the 0.35 identity
+  threshold). **Aggressive SeedVR2 is the main lever**: +36.9% vs +20.8%, ~45 s;
+  7B adds +57.3% luma detail but ~3x the chroma noise.
+- Composite in `gbrp`, not `yuv420p`; after `--protected` pass `--mask` the
   protected submask, else the garment arrives VAE-degraded.
+- Re-assert `unet_name` at run time: the graph bakes it in at build time, so a
+  config change alone runs the old checkpoint while recording the new one.
 
 ## Model facts, read from the installed source
 
@@ -191,9 +194,6 @@ Tracked in the task list; kept here only as orientation.
 
 - `mask.grow=4` puts 4.51% of the dilated subject mask onto another person.
   Reduce it or rely on the occluder layer.
-- Read garment metrics in order: class and coverage, boundaries, accessories,
-  then colour — and only if `colour_is_meaningful`. Chroma correction on a moved
-  silhouette just matches a missing garment to the palette of its replacement.
 - If the source face is covered, reference identity agreement is **unobservable**,
   not a score to maximise. `covering_removed` is the metric that matters.
 - Untested, in order: SeedVR2 **7B**, VACE-14B, a subject LoRA. Pose-vs-depth

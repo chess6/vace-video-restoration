@@ -74,10 +74,12 @@ Mean absolute difference inside the head, out of 255:
 | **whole-photo sheet vs identity pack** | **1.89** |
 
 Removing the reference entirely moves the face by 6.6/255. Exchanging two
-radically different sheets moves it by 1.89. **The model responds to the
-presence of a reference image, not to its content.** Improving reference
-material therefore cannot pay at this model size, and that includes generating
-better ones.
+radically different sheets moves it by 1.89 — the model responded to a
+reference's presence far more than to its content.
+
+**Scope.** One shot, one seed, one model size. The defensible claim is that
+reference-conditioned VACE 1.3B did not improve *this* pilot, not that better
+references can never pay. Testing that properly needs more shots and seeds.
 
 ### Regenerating the garment is wrong under any conditioning
 

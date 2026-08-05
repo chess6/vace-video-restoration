@@ -520,32 +520,25 @@ def garment_structure(var_path: Path, src_path: Path, mask_path: Path,
 def reference_identity(log):
     """Face embeddings of the consensus-verified references, once per run.
 
-    Reuses the same consensus machinery the pack uses, so "the person the
-    references agree on" means the same thing in both places, and an unverified
-    photograph cannot quietly become the identity target here either.
+    Delegates to identity.resolve_targets so that "the person the references
+    agree on" means exactly the same thing here, in the pack and in tracking.
+
+    It previously walked inputs/references itself, took the LARGEST face in each
+    photograph via face_detail(), and never consulted the exclusion list. Both
+    are the failure modes identity.py exists to prevent: the largest face in a
+    photograph is not necessarily the target, and a reference the user excluded
+    for this run could still enter the bank and then be used to judge whether a
+    generated frame looked like the target.
     """
-    from PIL import Image, ImageOps
     import track_subject as T
-    from common import IMAGE_EXTS
-    from make_reference_pack import consensus_identity, face_detail
+    from identity import load_exclusions, reference_files, resolve_targets
 
     models = T.Models(log)
-    items = []
-    for f in sorted(p for p in P.references.iterdir()
-                    if p.is_file() and p.suffix.lower() in IMAGE_EXTS):
-        try:
-            im = ImageOps.exif_transpose(Image.open(f)).convert("RGB")
-        except Exception:
-            continue
-        emb, _, frac = face_detail(models, im)
-        items.append({"file": f, "face": emb, "face_frac": frac,
-                      "size": list(im.size)})
-    info = consensus_identity(items)
-    embs = [m["face"] for m in items
-            if m.get("identity_group") == "consensus" and m["face"] is not None]
-    log.info("Identity target: %d consensus-verified reference face(s) of %d",
-             len(embs), info.get("candidates", 0))
-    return models, (np.stack(embs) if embs else None)
+    res = resolve_targets(reference_files(), models, log, load_exclusions(log))
+    bank = res.get("bank")
+    if bank is None:
+        log.warning("No verified reference identity; identity metrics skipped")
+    return models, bank
 
 
 def covering_metrics(var_path: Path, src_path: Path, mask_path: Path,
