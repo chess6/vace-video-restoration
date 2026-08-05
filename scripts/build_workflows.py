@@ -227,6 +227,16 @@ def common_models(g: Graph, cfg: dict) -> dict:
     m = cfg["model"]
     unet = g.add(N("UNETLoader", "VACE 1.3B",
                    unet_name=m["diffusion_model"], weight_dtype=m["weight_dtype"]))
+    # Optional subject LoRA, applied to the diffusion model only - there is no
+    # text-encoder side to patch here, since conditioning comes from UMT5 via a
+    # separate CLIPLoader. A LoRA is welded to one base checkpoint: loading one
+    # trained against a different model is not an error ComfyUI will catch, so
+    # the pin lives beside the checkpoint in the config rather than on a flag.
+    lora = m.get("lora") or {}
+    if lora.get("name"):
+        unet = g.add(N("LoraLoaderModelOnly", "Subject LoRA",
+                       model=unet(), lora_name=lora["name"],
+                       strength_model=float(lora.get("strength", 1.0))))
     clip = g.add(N("CLIPLoader", "UMT5-XXL FP8",
                    clip_name=m["text_encoder"], type=m["clip_type"], device="default"))
     vae = g.add(N("VAELoader", "Wan 2.1 VAE", vae_name=m["vae"]))

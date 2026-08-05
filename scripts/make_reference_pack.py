@@ -303,12 +303,23 @@ def source_outfit(work: Path, mask_video: Path, parser: Parser, n_probe: int,
 
 
 def cluster_references(files: list[Path], parser: Parser, models, log,
-                       thresh: float) -> list[dict]:
+                       thresh: float, verified: dict | None = None) -> list[dict]:
     """Group the external photographs by appearance, and gather everything the
     panel choice needs: garment palette, CLIP embedding, face embedding, size.
 
     The grouping is now diagnostic - see the module docstring. Identity is a
     separate question, decided in score_identity() from these same embeddings.
+
+    `verified` maps a resolved path to the target instance that
+    identity.resolve_targets already agreed on. It is not optional in practice:
+    without it this function called face_detail(), which returns the LARGEST
+    face in the photograph, silently discarding the verified target. In an image
+    where the subject is not the biggest face - a group shot, someone nearer the
+    camera - the panel choice, the yaw and the face fraction would then all
+    describe the wrong person, in a function whose whole job is to prepare
+    identity conditioning. main() filters `files` to verified images, so only
+    WHICH face was taken was wrong, not which files; that is quiet enough to
+    have survived this long.
     """
     from PIL import Image, ImageOps
     items = []
@@ -329,7 +340,14 @@ def cluster_references(files: list[Path], parser: Parser, models, log,
         # and clothing, so it must never be read as "a different viewing angle".
         # This one has all of that removed and describes the person only.
         id_emb = models.clip_embed([mask_to_identity(im, lab, feather=0)[0]])[0]
-        face, kps, face_frac = face_detail(models, im)
+        v = (verified or {}).get(str(f)) or (verified or {}).get(f)
+        if v is not None:
+            face, kps = v["face"], v.get("kps")
+            face_frac = float(v.get("face_frac") or 0.0)
+        else:
+            log.warning("%-34s no verified target instance; falling back to the "
+                        "largest face", f.name)
+            face, kps, face_frac = face_detail(models, im)
         items.append({"file": f, "image": im, "labels": lab, "palette": pal,
                       "clip": emb, "clip_identity": id_emb, "face": face,
                       "yaw": face_yaw(kps), "face_frac": face_frac,
@@ -592,7 +610,10 @@ def main() -> int:
     if len(usable) != len(refs):
         log.info("Pack will use %d of %d reference image(s); the rest are "
                  "excluded, unverified or ambiguous.", len(usable), len(refs))
-    groups = cluster_references(usable, parser, models, log, args.outfit_deltae)
+    verified = {str(Path(v["file"])): v["instance"]
+                for v in targets["per_image"].values()}
+    groups = cluster_references(usable, parser, models, log, args.outfit_deltae,
+                                verified=verified)
 
     chunks = pilot_chunks(man) if args.pilot else man["chunks"]
     shot_ids = sorted({c["shot_id"] for c in chunks})

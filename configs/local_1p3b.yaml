@@ -23,6 +23,12 @@ model:
   # umt5 xxl in ComfyUI is loaded via CLIPLoader with type "wan"
   clip_type: wan
   weight_dtype: default          # fp16 model; ComfyUI picks fp16 on sm_86
+  # Optional subject LoRA, in ComfyUI/models/loras. A LoRA is welded to the
+  # checkpoint above; one trained against a different base will load without
+  # complaint and quietly produce nonsense. Leave `name` empty for no LoRA.
+  lora:
+    name:            ""
+    strength:        1.0
 
 video:
   # Wan 2.1 is trained at 16 fps. The VACE working stream is resampled to this.

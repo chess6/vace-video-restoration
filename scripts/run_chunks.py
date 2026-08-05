@@ -471,6 +471,32 @@ def main() -> int:
     log.info("Pre-flight OK: depth%s present for all %d chunk(s)",
              " and masks" if use_mask else "", len(chunks))
 
+    # Validate the variant-specific inputs HERE, not inside the generation loop.
+    # These used to be checked only once a chunk was about to be generated, so
+    # --protected --dry-run reported "all checks passed" without ever looking for
+    # the protected submask - and the dry run exists precisely so that a guard is
+    # confirmed without spending a generation. A gate that is skipped by the
+    # command meant to exercise it is worse than no gate.
+    if args.protected and use_mask:
+        if args.roi:
+            log.error("--protected with --roi is not implemented: the submask is "
+                      "derived at full-frame geometry and would need re-warping.")
+            return 1
+        for c in chunks:
+            shot = next((x for x in man["shots"]
+                         if x["shot_id"] == c["shot_id"]), None)
+            pm = ((shot or {}).get("protected_mask") or {}).get("path")
+            if not pm:
+                log.error("%s: no protected submask. Run "
+                          "scripts/make_protected_mask.py --pilot first.",
+                          c["shot_id"])
+                return 1
+            if not (P.root / pm).exists():
+                log.error("%s: protected submask recorded but missing on disk: %s",
+                          c["shot_id"], pm)
+                return 1
+        log.info("Protected submask present for all %d chunk(s)", len(chunks))
+
     if args.dry_run:
         log.info("=" * 62)
         log.info("DRY RUN. All checks passed and %d chunk(s) WOULD be generated:",
