@@ -208,6 +208,36 @@ side-by-sides against the Lanczos baseline. The baseline needed no work:
 Lanczos, so the working stream *is* the default upscaler's output, frame-aligned
 with every variant.
 
+## Repeated on the 3B plate, and the plate question settled
+
+The arms above sat on a plate that turned out to be the 7B pass. Repeated on a
+3B plate, on the RunPod volume, with the same configs and one flag changed:
+
+| stream | frame | in-mask (regenerated) | chroma noise |
+|---|---|---|---|
+| Lanczos 720p | 15.2 | 9.7 | 1.58 |
+| **plate 3B aggressive** | **65.9 (+333%)** | **14.2 (+47%)** | 2.15 (+36%) |
+| plate 7B quiet | 22.0 (+44%) | 13.5 (+40%) | **2.29 (+45%)** |
+| VACE + plate, no LoRA | 56.2 (+269%) | 8.0 (−17%) | 1.57 (−1%) |
+| VACE + plate + LoRA | 55.3 (+264%) | 8.4 (−13%) | **1.40 (−12%)** |
+
+**The LoRA arm is the better of the two VACE arms**, on both axes: sharper in
+the regenerated pixels (8.4 vs 8.0) and 12% below baseline chroma where the
+control merely matches it. Small, but it is the first measurement that agrees
+with the user's own reading, who called VACE+LoRA best "but just slightly"
+before any of this was measured. It does not rescue VACE: both arms still land
+*below* a plain Lanczos upscale inside the submask.
+
+**It also explains the earlier disagreement.** The plate is the sharpest thing
+here and the noisiest in colour; the LoRA arm is the cleanest of everything
+measured. Sharpness and cleanliness point in opposite directions, and the metric
+had only been reporting the first.
+
+**The 7B quiet experiment fails.** Denoise 0.75 with lab colour matching was
+meant to keep 7B's detail without its coloured static. It kept neither: 44%
+whole-frame sharpness against 3B's 333%, and *more* chroma noise than 3B, not
+less. 3B aggressive is the plate to ship.
+
 ## Cost
 
 | | |

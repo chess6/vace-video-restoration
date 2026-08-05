@@ -4,8 +4,8 @@ Durable context: what is expensive to rediscover, and the standing instructions
 that outlive a session. **Read before starting work** (CLAUDE.md rule 0).
 
 **Size limit: 200 lines / 12 KB** (`check_repo_clean.sh`). A working memory, not
-a changelog: when full, delete the oldest resolved entries, and let anything a
-test or guard now enforces live there instead.
+a changelog: when full, delete resolved entries and let anything a guard now
+enforces live in that guard.
 
 **Rule 2a applies here.** Tracked, so never name an input file, a person, or an
 interval/duration/resolution of the user's media. Refer to things by role.
@@ -87,22 +87,24 @@ Numbers in `reports/pilot_results.md` and `lora_results.md`. Score identity
 through `identity.resolve_targets`, never `evaluate_pilot.py`'s own bank.
 
 - **The plate beat every VACE variant** (all under the 0.35 identity threshold);
-  **aggressive SeedVR2 is the lever**: frame sharpness 15.2 source → 50.3 plate.
-  7B adds +57.3% luma detail and ~3x the chroma noise. A `background` key names
-  the **profile, not the model**, so one key can hold either checkpoint's pixels.
-- **In the pixels VACE regenerates, it matches a plain Lanczos upscale**: 9.3
-  baseline, 15.7 plate (+70%), 9.6 VACE (+3.8%) — it discards the plate's work
-  in exactly the region a viewer looks at. Measure **in-mask, never the bounding
-  box**: the box is 20x the submask and reports +120%, the plate read back as
-  VACE's (`scripts/compare_720p.py`).
-- **Reference conditioning did not improve it**: no sheet moved the face
-  6.6/255, whole-photo vs identity-only 1.89 — presence, not content.
-- **A subject LoRA learns the face and still changes nothing.** 0.023 →
-  **0.5167** trained (ceiling 0.7454, real photographs), yet matched arms give
-  0.1682 vs 0.1612, 0.1263 at double strength, and on the plate 0.2015 vs
-  0.1769. Doubling the one free parameter makes it conclusive: **the protected
-  path has no room for an identity prior**. Score a LoRA only against the
-  held-out split; its trigger token is load-bearing; musubi's merge trap is in
+  **3B aggressive is the lever and the plate to ship**: sharpness 15.2 source →
+  **65.9** (3B) vs 50.3 (7B) vs 22.0 (7B at denoise 0.75 + lab, which kept
+  neither the detail nor the quiet — that experiment is closed). A `background`
+  key names the **profile, not the model**: one key can hold either's pixels.
+- **In the pixels VACE regenerates it is at or below a plain Lanczos upscale**:
+  on the 3B plate, baseline 9.7, plate 14.2 (+47%), VACE 8.0 / 8.4 with the
+  LoRA. It discards the plate's work in the one region a viewer looks at.
+  Measure **in-mask, never the bounding box** — the box is 20x the submask and
+  reports +120%, the plate read back as VACE's (`scripts/compare_720p.py`).
+- **Sharpness and chroma point opposite ways**: the plate is sharpest and
+  noisiest (+36%), the LoRA arm cleanest (−12%). Report both or the metric
+  contradicts the eye — it did, for a session.
+- **A subject LoRA learns the face and barely moves the pipeline.** 0.023 →
+  **0.5167** trained (ceiling 0.7454), yet matched arms give 0.1682 vs 0.1612,
+  0.1263 at double strength, on the plate 0.2015 vs 0.1769: **the protected path
+  has no room for an identity prior**. It is still the better VACE arm on the 3B
+  plate (in-mask 8.4 vs 8.0, chroma −12% vs −1%). Score only against the
+  held-out split; the trigger token is load-bearing; musubi's merge trap is in
   `prepare_musubi_dit.py`.
 - Composite in `gbrp`, not `yuv420p`; after `--protected` pass `--mask` the
   submask, else the garment arrives VAE-degraded.
@@ -162,12 +164,10 @@ Past mistakes worth not repeating — each cost a wrong conclusion:
   Name the measurement after what it measures.
 - **A detector's training bias read as absence.** Grounding DINO is trained on
   upright people; a reclining subject scored ≤0.27 against an upright bystander's
-  0.33–0.36, so the only candidate offered was the wrong person. "Found somebody"
-  is not "found the subject": retry lower whenever no candidate has identity
-  evidence, and never score a subject by height — pose makes it wrong.
-- **Container noise read as signal.** An exact-equality metric measured encoder
-  noise and inverted the ranking. Use a tolerance.
-- **"It ran" is not "it did something."** Eight LoRA checkpoints and the no-LoRA
+  0.33–0.36, offering only the wrong person. "Found somebody" is not "found the
+  subject": retry lower when no candidate has identity evidence, and never score
+  a subject by height.
+- **"It ran" is not "it did something."** Eight LoRA checkpoints and the
   baseline scored identical to four decimals: the merge had silently no-oped.
 - **A static mask is architecture, not a subject.** A bbox that barely moves has
   locked onto scenery. Correlate mask occupancy with per-pixel temporal variance:
@@ -175,7 +175,6 @@ Past mistakes worth not repeating — each cost a wrong conclusion:
 
 ## Standing instructions from the user
 
-- Cut short sample clips; nothing runs the full video without confirmation.
 - Every time work needs the user's eyes, hand over **one zip** from
   `scripts/make_review_bundle.py` (rule 1).
 - Prepare the 14B cloud path, but **do not download 14B locally**.
@@ -184,15 +183,16 @@ Past mistakes worth not repeating — each cost a wrong conclusion:
 - The macOS laptop has no CUDA and the lockfile is CUDA-only: **no local
   pipeline there**, so all GPU work runs on the rented box.
 - **Take the GPU box down whenever it is not actively needed**, including while
-  the user reviews, without asking. On Vast, from the box:
-  `vastai stop instance $CONTAINER_ID --api-key $CONTAINER_API_KEY`. Stop, never
-  destroy: `workspace_is_volume` is false there, so destroy wipes everything.
+  the user reviews, without asking. Stop, never destroy: Vast's `/workspace` is
+  not a volume, and a stopped box cannot restart while another tenant holds the
+  GPU — RunPod's **network volume** survives that and reattaches to a new pod.
 
 ## Cloud and open work
 
 `docs/CLOUD_RUNBOOK.md`: connection quirks, transfer allowlist, gates, teardown.
-Protected-regenerable fraction: 1.57% at 240p, 4.42% at 720p — that smallness is
-the measured reason VACE cannot be steered here.
+Protected-regenerable fraction 4.42% at 720p — that smallness is the measured
+reason VACE cannot be steered here. `scripts/state_bundle.sh` carries the
+irreplaceable half off a box; run it FIRST, before any work.
 
 - `mask.grow=4` puts 4.51% of the dilated mask onto another person: reduce it or
   rely on the occluder layer.
