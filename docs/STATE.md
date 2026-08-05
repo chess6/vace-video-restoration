@@ -83,26 +83,27 @@ Enforced by `scripts/test_reference_pack.py`.
 
 ## What is settled at 1.3B — do not re-run these
 
-Numbers in `reports/pilot_results.md` and `reports/lora_results.md`. Always score
-identity through `identity.resolve_targets`, never `evaluate_pilot.py`'s own.
+Numbers in `reports/pilot_results.md` and `lora_results.md`. Score identity
+through `identity.resolve_targets`, never `evaluate_pilot.py`'s own bank.
 
-- **The plate beat every VACE variant** (all under the 0.35 identity threshold).
-  **Aggressive SeedVR2 is the main lever**: sharpness 15.2 source → 50.3 plate
-  (that one is the **7B** pass), and VACE on it hands a third back at 40.6. 7B
-  adds +57.3% luma detail but ~3x the chroma noise.
-- A `background` key names the **profile, not the model**: 7B is selectable at
-  run time, so identical keys can hold different checkpoints' pixels. Check.
-- **Reference conditioning did not improve it.** Removing the sheet moved the
-  face 6.6/255; swapping whole-photo for identity-only, 1.89 — presence mattered
-  more than content.
-- **A subject LoRA learns the face and still changes nothing here.** 0.023 →
+- **The plate beat every VACE variant** (all under the 0.35 identity threshold);
+  **aggressive SeedVR2 is the lever**: frame sharpness 15.2 source → 50.3 plate.
+  7B adds +57.3% luma detail and ~3x the chroma noise. A `background` key names
+  the **profile, not the model**, so one key can hold either checkpoint's pixels.
+- **In the pixels VACE regenerates, it matches a plain Lanczos upscale**: 9.3
+  baseline, 15.7 plate (+70%), 9.6 VACE (+3.8%) — it discards the plate's work
+  in exactly the region a viewer looks at. Measure **in-mask, never the bounding
+  box**: the box is 20x the submask and reports +120%, the plate read back as
+  VACE's (`scripts/compare_720p.py`).
+- **Reference conditioning did not improve it**: no sheet moved the face
+  6.6/255, whole-photo vs identity-only 1.89 — presence, not content.
+- **A subject LoRA learns the face and still changes nothing.** 0.023 →
   **0.5167** trained (ceiling 0.7454, real photographs), yet matched arms give
-  0.1682 without vs 0.1612 with, 0.1263 at double strength, and on the plate
-  0.2015 vs 0.1769. Doubling the one free parameter makes it conclusive: **the
-  protected path has no room for an identity prior** (4.42% of the figure).
-- Score a LoRA **only** against the held-out split (the training bank tracks it
-  closely, which makes it dangerous); its trigger token is load-bearing; musubi's
-  merge trap is in `prepare_musubi_dit.py`.
+  0.1682 vs 0.1612, 0.1263 at double strength, and on the plate 0.2015 vs
+  0.1769. Doubling the one free parameter makes it conclusive: **the protected
+  path has no room for an identity prior**. Score a LoRA only against the
+  held-out split; its trigger token is load-bearing; musubi's merge trap is in
+  `prepare_musubi_dit.py`.
 - Composite in `gbrp`, not `yuv420p`; after `--protected` pass `--mask` the
   submask, else the garment arrives VAE-degraded.
 
@@ -168,7 +169,6 @@ Past mistakes worth not repeating — each cost a wrong conclusion:
   noise and inverted the ranking. Use a tolerance.
 - **"It ran" is not "it did something."** Eight LoRA checkpoints and the no-LoRA
   baseline scored identical to four decimals: the merge had silently no-oped.
-  Arms must be shown to differ in pixels before their scores mean anything.
 - **A static mask is architecture, not a subject.** A bbox that barely moves has
   locked onto scenery. Correlate mask occupancy with per-pixel temporal variance:
   the doorway track scored r=+0.03 against motion, a correct one +0.58.

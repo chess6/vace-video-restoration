@@ -180,6 +180,34 @@ regenerates comes back softer than what it replaced. That is the pilot's
 "the plate beat every VACE variant" finding, reproduced on this configuration
 and now with a LoRA in the mix.
 
+### And in the pixels VACE actually paints, it matches a plain upscale
+
+Whole-frame numbers hide the thing being asked about, because 95.58% of the
+frame is plate. Measured over the protected submask's **pixels** — not its
+bounding box, which is twenty times the mask and mostly plate:
+
+| region | Lanczos 720p | plate | VACE+plate | VACE+plate+LoRA |
+|---|---|---|---|---|
+| whole frame | 15.2 | 50.3 | 40.7 | 40.6 |
+| submask bounding box | 15.3 | 48.2 | 33.7 | 33.1 |
+| **submask pixels (regenerated)** | **9.3** | **15.7 (+70%)** | **9.6 (+3.8%)** | **9.4 (+1.2%)** |
+
+**In the region it exists to improve, VACE is within noise of upscaling the
+source with Lanczos.** The plate had already restored those pixels by +70%;
+VACE discards that and returns something no sharper than the original. The
+background looks restored because it is plate, and the face does not because it
+is not — which is what the user reported before any of this was measured:
+"as if I'm watching the same original clip".
+
+Note the middle row. A bounding box around the head reports +120% and would have
+been read as VACE working. It is measuring the plate.
+
+`scripts/compare_720p.py` produces this table, the 100% crops and the
+side-by-sides against the Lanczos baseline. The baseline needed no work:
+`preprocess_source.py` already upscales the source to the working geometry with
+Lanczos, so the working stream *is* the default upscaler's output, frame-aligned
+with every variant.
+
 ## Cost
 
 | | |

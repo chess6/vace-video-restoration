@@ -74,29 +74,59 @@ def label_bar(width: int, text: str, height: int = 28) -> np.ndarray:
     return bar
 
 
-def mask_box(mask_path: Path, n_frames: int, pad: float = 0.15):
-    """Union of the tracked subject's box, so one crop works for every frame."""
+def read_masks(mask_path: Path) -> np.ndarray:
     import cv2
     cap = cv2.VideoCapture(str(mask_path))
-    xs0, ys0, xs1, ys1 = [], [], [], []
+    out = []
     while True:
         ok, m = cap.read()
         if not ok:
             break
-        g = cv2.cvtColor(m, cv2.COLOR_BGR2GRAY) > 127
+        out.append(cv2.cvtColor(m, cv2.COLOR_BGR2GRAY) > 127)
+    cap.release()
+    return np.asarray(out)
+
+
+def mask_box(masks: np.ndarray, pad: float = 0.15):
+    """Union of the mask's box, so one crop works for every frame."""
+    xs0, ys0, xs1, ys1 = [], [], [], []
+    h = w = 0
+    for g in masks:
         if g.sum() < 64:
             continue
         ys, xs = np.where(g)
         xs0.append(xs.min()); xs1.append(xs.max())
         ys0.append(ys.min()); ys1.append(ys.max())
         h, w = g.shape
-    cap.release()
     if not xs0:
         return None
     x0, x1 = min(xs0), max(xs1)
     y0, y1 = min(ys0), max(ys1)
     dx, dy = int((x1 - x0) * pad), int((y1 - y0) * pad)
     return (max(0, x0 - dx), max(0, y0 - dy), min(w, x1 + dx), min(h, y1 + dy))
+
+
+def sharpness_in_mask(frames: np.ndarray, masks: np.ndarray, idx) -> float | None:
+    """Sharpness over the mask's PIXELS, not its bounding box.
+
+    A bounding box around a head is mostly not the head: the protected submask
+    is 4.42% of the figure and its box is twenty times that, so a box-based
+    number is dominated by pixels the plate supplied and reports the plate's
+    sharpness back as if VACE had produced it. This is the only measurement that
+    sees what was actually regenerated.
+    """
+    import cv2
+    vals = []
+    for i in idx:
+        if i >= len(masks):
+            break
+        m = masks[i]
+        if m.sum() < 64:
+            continue
+        lap = cv2.Laplacian(cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY),
+                            cv2.CV_64F)
+        vals.append(float(lap[m].var()))
+    return float(np.median(vals)) if vals else None
 
 
 def main() -> int:
@@ -155,32 +185,46 @@ def main() -> int:
         log.warning("frame counts differ; comparing the first %d of each", n)
 
     idx = np.linspace(0, n - 1, min(16, n)).astype(int)
-    box = mask_box(args.mask, n) if args.mask else None
+    masks = read_masks(args.mask) if args.mask else None
+    box = mask_box(masks) if masks is not None and len(masks) else None
     if box:
-        log.info("subject box for 100%% crops: x %d-%d, y %d-%d (%dx%d px)",
-                 box[0], box[2], box[1], box[3], box[2] - box[0], box[3] - box[1])
+        log.info("mask box for 100%% crops: x %d-%d, y %d-%d (%dx%d px); the "
+                 "mask itself covers %.2f%% of it",
+                 box[0], box[2], box[1], box[3], box[2] - box[0], box[3] - box[1],
+                 100 * masks.sum() / max(1, len(masks) * (box[2] - box[0]) *
+                                         (box[3] - box[1])))
 
     # ---- measured, so the pictures are not judged alone ---------------------
     stats = {}
     b_full = sharpness(base, idx)
     b_crop = sharpness(base, idx, box) if box else None
-    log.info("=" * 66)
-    log.info("%-22s %10s %9s %10s %9s", "stream", "sharp", "vs base",
-             "subject", "vs base")
+    b_in = sharpness_in_mask(base, masks, idx) if masks is not None else None
+    log.info("=" * 78)
+    log.info("%-22s %8s %9s %8s %9s %8s %9s", "stream", "frame", "vs base",
+             "box", "vs base", "in-mask", "vs base")
     for lab, path, fr in loaded:
         f_full = sharpness(fr[:n], idx)
         f_crop = sharpness(fr[:n], idx, box) if box else None
-        stats[lab] = {"sharpness": round(f_full, 2),
-                      "vs_baseline_pct": round(100 * (f_full / b_full - 1), 1),
-                      "subject_sharpness": round(f_crop, 2) if f_crop else None,
-                      "subject_vs_baseline_pct":
+        f_in = sharpness_in_mask(fr[:n], masks, idx) if masks is not None else None
+        stats[lab] = {"frame_sharpness": round(f_full, 2),
+                      "frame_vs_baseline_pct": round(100 * (f_full / b_full - 1), 1),
+                      "box_sharpness": round(f_crop, 2) if f_crop else None,
+                      "box_vs_baseline_pct":
                           round(100 * (f_crop / b_crop - 1), 1) if f_crop else None,
+                      "in_mask_sharpness": round(f_in, 2) if f_in else None,
+                      "in_mask_vs_baseline_pct":
+                          round(100 * (f_in / b_in - 1), 1) if f_in and b_in else None,
                       "source": str(path)}
-        log.info("%-22s %10.1f %+8.1f%% %10s %9s", lab, f_full,
+        log.info("%-22s %8.1f %+8.1f%% %8s %9s %8s %9s", lab, f_full,
                  100 * (f_full / b_full - 1),
                  f"{f_crop:.1f}" if f_crop else "-",
-                 f"{100 * (f_crop / b_crop - 1):+.1f}%" if f_crop else "-")
-    log.info("=" * 66)
+                 f"{100 * (f_crop / b_crop - 1):+.1f}%" if f_crop else "-",
+                 f"{f_in:.1f}" if f_in else "-",
+                 f"{100 * (f_in / b_in - 1):+.1f}%" if f_in and b_in else "-")
+    log.info("=" * 78)
+    log.info("`in-mask` is the only column that sees what was regenerated. The "
+             "box around a head is mostly not the head, so `box` still reports "
+             "pixels the plate supplied.")
     log.info("Sharpness is a proxy. Ringing and noise raise it too; the clips "
              "are the evidence, these are the check.")
 

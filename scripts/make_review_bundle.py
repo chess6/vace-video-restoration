@@ -36,6 +36,21 @@ from common import (  # noqa: E402
 
 # What to look for in each artefact. Keyed by the name inside the archive.
 NOTES = {
+    "compare/compare_720p_head/crop_frame026.png":
+        "START HERE. Four panels, cut at 100% and never resized: the source "
+        "upscaled to 720p with Lanczos, the SeedVR2 plate, VACE on that plate, "
+        "and VACE with the LoRA. Measured over the pixels VACE actually "
+        "regenerates, the plate is +70% sharper than the Lanczos upscale and "
+        "VACE is +3.8% - i.e. indistinguishable from it. That is why the face "
+        "looks unrestored while the rest of the frame does not.",
+    "compare/compare_720p_head/plate_7B_vs_lanczos_720p_h264.mp4":
+        "The plate against the default upscale, side by side at native "
+        "resolution. This is the comparison that decides whether the pipeline "
+        "is worth running at all.",
+    "compare/compare_720p_head/vace_plate_LoRA_vs_lanczos_720p_h264.mp4":
+        "VACE+LoRA against the default upscale. Watch the face specifically: "
+        "the background is plate and looks restored, the head is regenerated "
+        "and does not.",
     "lora/plate_background_aggressive.mp4":
         "START HERE. The SeedVR2 plate alone, no VACE. This is where the quality "
         "comes from: +231% sharpness over the source, against +167% for the VACE "
@@ -249,6 +264,20 @@ def main() -> int:
                 arc = f"lora/plate_{profile}." + ("mkv" if args.lossless else "mp4")
                 sz = add_video(zf, src, arc, tmp, args.crf, args.lossless, log)
                 included.append((arc, sz))
+
+        # ---- 720p comparison against the default upscale -----------------------
+        for d in sorted(P.outputs.glob("compare_720p*")):
+            if not d.is_dir():
+                continue
+            for p in sorted(d.glob("*.png")) + sorted(d.glob("*.json")):
+                zf.write(p, f"compare/{d.name}/{p.name}")
+                included.append((f"compare/{d.name}/{p.name}", p.stat().st_size))
+            for v in sorted(d.glob("*_h264.mp4")):
+                arc = f"compare/{d.name}/{v.name}"
+                # Already H.264 at the bundle's own quality; re-encoding a
+                # side-by-side to judge sharpness would be judging the encoder.
+                zf.write(v, arc)
+                included.append((arc, v.stat().st_size))
 
         # ---- reports ----------------------------------------------------------
         for rp in ("pilot_findings.md", "pilot_metrics.json",
