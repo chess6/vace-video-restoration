@@ -16,9 +16,16 @@ BASE="https://huggingface.co/$REPO/resolve/main"
 mkdir -p "$MODELS/diffusion_models" "$MODELS/vae"
 
 # dest_subdir | filename | remote_path | sha256 | size_bytes
+#
+# The sizes below are the sizes of the files whose SHA256 are recorded here, as
+# measured after a verified download. They were previously 3388459832 and
+# 503341328, which no file with these checksums has ever had: the size test runs
+# first, so it failed on a correct file and forced a 3.9 GB re-download on every
+# single invocation, after which the SHA256 passed and declared it fine. A size
+# that disagrees with a matching checksum is a bug in the size, not the file.
 FILES=(
-"diffusion_models|seedvr2_3b_fp8_e4m3fn.safetensors|diffusion_models/seedvr2_3b_fp8_e4m3fn.safetensors|a0226eaa2c3e6f47ae5ce83225120f16479da890ced1a3bc32b1a14619787914|3388459832"
-"vae|seedvr2_ema_vae_fp16.safetensors|vae/seedvr2_ema_vae_fp16.safetensors|20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1|503341328"
+"diffusion_models|seedvr2_3b_fp8_e4m3fn.safetensors|diffusion_models/seedvr2_3b_fp8_e4m3fn.safetensors|a0226eaa2c3e6f47ae5ce83225120f16479da890ced1a3bc32b1a14619787914|3392794232"
+"vae|seedvr2_ema_vae_fp16.safetensors|vae/seedvr2_ema_vae_fp16.safetensors|20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1|501324814"
 )
 
 rc=0

@@ -25,7 +25,10 @@ COMFY_COMMIT="e377e263049f9338b4d12a3dd417b36ae62948ff"
 SAM2_REPO="https://github.com/facebookresearch/sam2"
 SAM2_COMMIT="2b90b9f5ceec907a1c18123530e92e794ad901a4"
 PYTHON_BIN="${PYTHON_BIN:-python3.12}"
-TORCH_INDEX="https://download.pytorch.org/whl/cu124"
+# Must match the +cuXXX local version pinned in requirements.lock.txt: that build
+# exists only on its own index. Pointing here at cu124 while the lock pins
+# 2.9.1+cu128 makes the install unresolvable, which is how this was found.
+TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu128}"
 
 CHECK_ONLY=0
 WITH_MODELS=1
