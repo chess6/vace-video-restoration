@@ -42,7 +42,15 @@ from common import (  # noqa: E402
 )
 
 # variant -> (vace tag or None, background profile or None, path, description)
-# tag None means "not a VACE variant"; path "A" = preserved in-VACE, "B" = composited.
+# tag None means "not a VACE variant". Paths:
+#   "A" preserved in-VACE      "B" composited on the subject mask
+#   "R" ROI, mapped back       "P" composited on the PROTECTED submask
+# "P" exists because the retained pipeline runs run_chunks --protected, which
+# regenerates only the head. Compositing that on the SUBJECT mask would take the
+# whole figure from VACE's VAE round-trip of the plate and lose ~8% of the
+# garment's detail for nothing; the protected submask is the correct alpha.
+# Without a P entry the protected comparison was not reproducible through this
+# script at all - it only existed as commands typed by hand.
 PLAN = [
     ("lanczos_original", None, None, None,
      "Original, Lanczos-enlarged to working geometry. The baseline everything "
@@ -63,6 +71,14 @@ PLAN = [
      "VACE preserving the aggressive plate directly."),
     ("vace_pathB_aggressive", "baseline", "background_aggressive", "B",
      "Baseline VACE subject composited onto the aggressive plate."),
+    ("vace_protected_conservative", "prot_bg_conservative",
+     "background_conservative", "P",
+     "Protected run: VACE regenerates only the confidently exposed head, "
+     "composited onto the conservative plate using that same submask, so the "
+     "garment stays plate-exact."),
+    ("vace_protected_aggressive", "prot_bg_aggressive",
+     "background_aggressive", "P",
+     "Protected run over the aggressive plate."),
     ("vace_roi_conservative", "roi", "background_conservative", "R",
      "Subject generated on the stabilized ROI crop, then mapped back to full "
      "frame over the conservative plate. Only the masked figure comes from the "
@@ -212,17 +228,27 @@ def main() -> int:
                 missing.append(gap)
                 continue
 
-        if path == "B":
+        if path in ("B", "P"):
             for c in pchunks:
                 subject = vace_output(c, tag)
                 pl = plate_path(c, profile)
                 if subject is None or not subject.exists() or pl is None or not pl.exists():
                     gap = f"{name}: {c['chunk_id']} needs tag {tag!r} and plate {profile!r}"
                     break
+                extra = []
+                if path == "P":
+                    shot = next((x for x in man["shots"]
+                                 if x["shot_id"] == c["shot_id"]), None)
+                    pm = ((shot or {}).get("protected_mask") or {}).get("path")
+                    if not pm or not (P.root / pm).exists():
+                        gap = (f"{name}: {c['shot_id']} has no protected submask; "
+                               f"run scripts/make_protected_mask.py")
+                        break
+                    extra = ["--mask", str(P.root / pm)]
                 part = out_dir / f"_{name}_{c['chunk_id']}.mkv"
                 r = run([str(P.venv_python), str(P.scripts / "composite_subject.py"),
                          "--chunk", c["chunk_id"], "--subject", str(subject),
-                         "--background", str(pl), "--out", str(part)],
+                         "--background", str(pl), "--out", str(part)] + extra,
                         log, check=False)
                 if r.returncode != 0:
                     gap = f"{name}: compositing failed ({(r.stderr or '').strip()[-200:]})"

@@ -324,12 +324,25 @@ def graph_main(cfg: dict, masked: bool = True, reference: bool = True,
                         file="chunk_mask.mp4"))
         msk_i = g.add(N("GetVideoComponents", "Mask frames", video=msk_v()))
         mask = g.add(N("ImageToMask", "Mask -> MASK", image=msk_i(), channel="red"))
-        if int(cfg["mask"]["feather"]) > 0:
-            mask = g.add(N("FeatherMask", "Soften mask edge", mask=mask(),
-                           left=int(cfg["mask"]["feather"]),
-                           top=int(cfg["mask"]["feather"]),
-                           right=int(cfg["mask"]["feather"]),
-                           bottom=int(cfg["mask"]["feather"])))
+        # No FeatherMask here, deliberately. Read the node in the pinned
+        # revision (comfy_extras/nodes_mask.py): it multiplies the leftmost N
+        # COLUMNS and topmost N ROWS of the canvas by a ramp -
+        #     for x in range(left): output[:, :, x] *= (x + 1.0) / left
+        # It feathers the frame border, not the subject's contour. For a figure
+        # in the middle of frame it does nothing at all, and where the figure
+        # touches a border it erodes the mask there, making VACE preserve
+        # exactly where it was asked to regenerate. mask.feather never softened
+        # a silhouette in this pipeline.
+        #
+        # The contour ramp that does work is in composite_subject.alpha_from_mask:
+        # erode by half the band, then blur, so the ramp sits ACROSS the
+        # silhouette instead of outside it. That is Path B, which the pilot
+        # retained. Path A therefore has a hard mask edge, which is honest -
+        # previously it had a hard edge plus a damaged frame border.
+        if int(cfg["mask"].get("feather", 0)) > 0:
+            print("  note: mask.feather is not applied in-graph; the native "
+                  "FeatherMask feathers the canvas, not the contour. Path B "
+                  "handles the contour via composite.band_px.")
         # THE critical composite: preserved-base RGB outside the mask, depth
         # inside it. The base is the original, or the SeedVR2 plate when the
         # background stage is in use.

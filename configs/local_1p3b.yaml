@@ -258,6 +258,10 @@ composite:
 
 mask:
   # Feather radius in pixels applied to the tracked figure mask.
+  # NOT applied in-graph. ComfyUI's native FeatherMask ramps the canvas border
+  # (leftmost N columns, topmost N rows), not the subject contour - verified in
+  # comfy_extras/nodes_mask.py at the pinned revision. The contour ramp lives in
+  # composite_subject.py (composite.band_px), on the retained Path B.
   feather: 6
   # Dilate the tracked mask before feathering, so the silhouette edge and a little
   # contact shadow fall inside the regenerated region.
