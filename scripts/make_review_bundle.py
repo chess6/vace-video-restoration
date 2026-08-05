@@ -36,15 +36,24 @@ from common import (  # noqa: E402
 
 # What to look for in each artefact. Keyed by the name inside the archive.
 NOTES = {
+    "lora/plate_background_aggressive.mp4":
+        "START HERE. The SeedVR2 plate alone, no VACE. This is where the quality "
+        "comes from: +231% sharpness over the source, against +167% for the VACE "
+        "clips that sit on top of it. If VACE is not adding something you can "
+        "see, the plate alone is the better output.",
+    "lora/shot0000_c000_loraE.mp4":
+        "VACE on the plate, NO LoRA. The honest comparison for loraD.",
+    "lora/shot0000_c000_loraD.mp4":
+        "VACE on the plate, WITH the subject LoRA. Same run as loraE in every "
+        "other respect. Measured 0.177 identity against photographs the LoRA "
+        "never saw, versus 0.202 without it - no improvement. Your eye is the "
+        "discriminator: if you can tell D from E, the metric is wrong.",
     "lora/shot0000_c000_loraB.mp4":
-        "The subject-LoRA control: no LoRA. Compare it with loraA, which is the "
-        "SAME run with a LoRA of this person's face added and nothing else "
-        "changed. The measurement says they are the same (0.168 vs 0.161 "
-        "identity against photographs the LoRA never saw). Your eye is the "
-        "discriminator here - if you can tell them apart, the metric is wrong.",
+        "Earlier arm, NO plate - kept only to show what the missing plate cost. "
+        "These measured 5% SOFTER than the source, which is why the first batch "
+        "looked no better than the original.",
     "lora/shot0000_c000_loraA.mp4":
-        "Subject LoRA at strength 1.0. Only 4.42% of the figure - the exposed "
-        "head - is regenerated at all; everything else is the plate.",
+        "Earlier arm, no plate, with LoRA. Same caveat as loraB.",
     "lora/shot0000_c000_loraC.mp4":
         "The same LoRA at strength 2.0. Measured WORSE (0.126) and a face was "
         "detectable in fewer frames, which usually means the region is being "
@@ -158,6 +167,7 @@ def main() -> int:
     tmp.mkdir(parents=True, exist_ok=True)
 
     manifest_note = ""
+    man: dict = {}
     try:
         man = load_manifest()
         n = man["normalized"]
@@ -216,11 +226,29 @@ def main() -> int:
             arc = f"lora/{v.name}"
             sz = add_video(zf, v, arc, tmp, args.crf, args.lossless, log)
             included.append((arc, sz))
-        for j in ("identity_scores.json", "vace_identity.json"):
+        for j in ("identity_scores.json", "vace_identity.json",
+                  "vace_identity_plate.json"):
             p = P.intermediate / "lora_eval" / j
             if p.exists():
                 zf.write(p, f"lora/{j}")
                 included.append((f"lora/{j}", p.stat().st_size))
+        # The plate the arms sit on. Without it in the same archive the reviewer
+        # is comparing generated clips against memory, and the question that
+        # matters here - does VACE add anything over the plate alone - cannot be
+        # answered by looking at the VACE clips.
+        seen_plates = set()
+        for c in man.get("chunks") or []:
+            for profile, entry in (c.get("background") or {}).items():
+                rel_p = entry.get("path") if isinstance(entry, dict) else entry
+                if not rel_p or profile in seen_plates:
+                    continue
+                src = P.root / rel_p
+                if not src.exists():
+                    continue
+                seen_plates.add(profile)
+                arc = f"lora/plate_{profile}." + ("mkv" if args.lossless else "mp4")
+                sz = add_video(zf, src, arc, tmp, args.crf, args.lossless, log)
+                included.append((arc, sz))
 
         # ---- reports ----------------------------------------------------------
         for rp in ("pilot_findings.md", "pilot_metrics.json",

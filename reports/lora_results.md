@@ -98,19 +98,27 @@ sampler, geometry and reference pack cannot have drifted. All three scored
 against the held-out bank, with each frame cropped to the tracked subject before
 face detection so the other person in the shot cannot be scored by mistake.
 
-**All three ran WITHOUT `--background`, so the preserved 95.58% is the original
-frame, not a restored plate.** The three arms are still matched to each other,
-which is what the comparison below rests on, but they are not the shipped path
-and they do not look like it: the user's first observation on seeing them was
-that the quality matched the source, which is exactly what they were. The run
-log asserted "comes from the plate" regardless of the flag and was believed;
-that line now names what actually supplies the region, and `--protected` without
-`--background` warns before the GPU is touched.
+The first three ran **without `--background`**, so their preserved 95.58% was the
+original frame rather than a restored plate. The run log asserted "comes from the
+plate" regardless of the flag and was believed; it now names what actually
+supplies the region, and `--protected` without `--background` warns before the
+GPU is touched. The user caught it in one sentence after watching the clips:
+the quality matched the source, which is exactly what it was.
 
-Whether the plate changes the LoRA verdict is untested. It should not — VACE
-regenerates the same submask either way, and the constraint identified below is
-the size of that submask, not the sharpness of what surrounds it — but "should
-not" is not a measurement.
+**Repeated on the plate, the verdict is identical.** Two more arms, same configs,
+`--background background_aggressive`:
+
+| arm | LoRA | plate | identity vs held-out |
+|---|---|---|---|
+| loraE | none | aggressive | **0.2015** |
+| loraD | strength 1.0 | aggressive | **0.1769** |
+| loraB | none | none | 0.1682 |
+| loraA | strength 1.0 | none | 0.1612 |
+
+Still no improvement, still the wrong way round, on the path that actually ships.
+The plate lifts both arms by about 0.03 — restoring the surroundings helps the
+face a little — and the LoRA costs about 0.02 in both pairs. So the earlier
+conclusion holds without the caveat it was carrying.
 
 | arm | LoRA | identity vs held-out | frames with a face |
 |---|---|---|---|
@@ -141,6 +149,28 @@ score. If VACE is ever given a larger region to regenerate, or a larger model at
 a size where its output beats the plate, the LoRA is ready and the harness to
 judge it exists.
 
+## What the plate is worth, and what VACE costs on top of it
+
+Median Laplacian variance over 16 frames, whole frame. A sharpness **proxy** —
+`docs/STATE.md` warns that high-frequency energy is not the same as restored
+detail, since ringing and noise raise it too — so every row is stated against
+the source it has to beat, with the plate as the reference point.
+
+| stream | sharpness | vs source |
+|---|---|---|
+| source, unrestored | 15.2 | — |
+| **SeedVR2 plate, aggressive** | **50.3** | **+231%** |
+| VACE on the plate (loraD / loraE) | 40.6 / 40.7 | +167% |
+| VACE with no plate (loraA / loraB) | 14.4 / 14.5 | **−5.6% / −4.9%** |
+
+Two things fall out. The plate-free arms are *softer than the source* — the
+first batch did not merely fail to improve the shot, it slightly degraded it,
+which is what the user saw. And VACE on the plate lands a third of the way back
+down: it takes a +231% plate and returns +167%, because the region it
+regenerates comes back softer than what it replaced. That is the pilot's
+"the plate beat every VACE variant" finding, reproduced on this configuration
+and now with a LoRA in the mix.
+
 ## Cost
 
 | | |
@@ -157,8 +187,8 @@ consistency check exist.
 
 ## Limits
 
-- The pipeline arms carried **no restored plate** (above). Matched to each other,
-  not representative of output quality.
+- Two of the four pipeline arms carried **no restored plate**; the plate-backed
+  pair is the one that represents the shipped path.
 - Identity here is measured on **probe generations from a portrait prompt**,
   head-on and well lit, which is the friendliest possible case. It says the LoRA
   learned the face; it does not say what happens inside the pipeline, where VACE

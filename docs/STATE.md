@@ -87,24 +87,23 @@ Numbers in `reports/pilot_results.md` and `reports/lora_results.md`. Always scor
 identity through `identity.resolve_targets`, never `evaluate_pilot.py`'s own.
 
 - **The plate beat every VACE variant** (all under the 0.35 identity threshold).
-  **Aggressive SeedVR2 is the main lever**: +36.9% vs +20.8%, ~45 s; 7B adds
-  +57.3% luma detail but ~3x the chroma noise.
+  **Aggressive SeedVR2 is the main lever**: sharpness 15.2 source → 50.3 plate,
+  and VACE on that plate hands a third of it back at 40.6. 7B adds +57.3% luma
+  detail but ~3x the chroma noise.
 - **Reference conditioning did not improve it.** Removing the sheet moved the
-  face 6.6/255; swapping whole-photo for identity-only, 1.89 — the model read a
-  reference's *presence* more than its content.
+  face 6.6/255; swapping whole-photo for identity-only, 1.89 — presence mattered
+  more than content.
 - **A subject LoRA learns the face and still changes nothing here.** 0.023 →
   **0.5167** trained (ceiling 0.7454, real photographs), yet matched pipeline
-  arms give 0.1682 without, 0.1612 with, 0.1263 at double strength — worse, and
-  fewer frames yield a detectable face. Doubling the one free parameter makes it
+  arms give 0.1682 without vs 0.1612 with, 0.1263 at double strength, and on the
+  plate 0.2015 without vs 0.1769 with. Doubling the one free parameter makes it
   conclusive: **the protected path has no room for an identity prior** (4.42% of
-  the figure, pinned by control). Those arms carried **no plate**: `--protected`
-  without `--background` preserves the ORIGINAL everywhere but the submask, so
-  the output looks like the source. They show identity, not quality.
-- Score a LoRA **only** against the held-out split; the training bank tracks it
-  closely, which makes it dangerous. Its trigger token is load-bearing; musubi's
-  merge trap: `prepare_musubi_dit.py`.
+  the figure, pinned by control).
+- Score a LoRA **only** against the held-out split (the training bank tracks it
+  closely, which makes it dangerous); its trigger token is load-bearing; musubi's
+  merge trap is in `prepare_musubi_dit.py`.
 - Composite in `gbrp`, not `yuv420p`; after `--protected` pass `--mask` the
-  protected submask, else the garment arrives VAE-degraded.
+  submask, else the garment arrives VAE-degraded.
 
 ## Model facts, read from the installed source
 
@@ -191,10 +190,10 @@ Past mistakes worth not repeating — each cost a wrong conclusion:
 ## Cloud and open work
 
 `docs/CLOUD_RUNBOOK.md`: connection quirks, transfer allowlist, gates, teardown.
-Protected-regenerable fraction: 1.57% at 240p, 4.42% at 720p — and that
-smallness is now the measured reason VACE cannot be steered here.
+Protected-regenerable fraction: 1.57% at 240p, 4.42% at 720p — that smallness is
+the measured reason VACE cannot be steered here.
 
-- `mask.grow=4` puts 4.51% of the dilated subject mask onto another person.
-  Reduce it or rely on the occluder layer.
+- `mask.grow=4` puts 4.51% of the dilated mask onto another person: reduce it or
+  rely on the occluder layer.
 - Untested: **VACE-14B**. Pose-vs-depth control and any further LoRA work matter
   only if VACE earns its place at a larger size — at 1.3B it has not.
