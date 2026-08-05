@@ -133,6 +133,29 @@ background:
         Reconstructs stronger plausible environmental detail. Expect more
         invented texture, and check signage and distant faces before trusting it.
 
+    # 7B's detail without 7B's chroma noise - the open question the user can see
+    # in the output. 7B measured ~3x the coloured static of 3B at denoise 1.0
+    # with wavelet matching, so this keeps the step count that produces the
+    # detail and changes the two things that produce the noise: less invention
+    # (denoise 0.75) and the most faithful colour match installed (lab).
+    #
+    # The MODEL is not set here, because this block cannot set it: the
+    # checkpoint comes from `background.model` or `restore_background.py
+    # --model`. Run it as:
+    #   scripts/restore_background.py --pilot --profile background_7b_quiet \
+    #       --model seedvr2_7b_fp8_e4m3fn.safetensors
+    # The name carries the intent; nothing in the manifest records which
+    # checkpoint produced a plate, which is exactly how a 7B plate once ended up
+    # under a key that reads as 3B (docs/STATE.md).
+    background_7b_quiet:
+      steps: 25
+      cfg: 1.0
+      denoise: 0.75
+      color_correction: lab
+      description: >-
+        7B at reduced denoise with lab colour matching. Tests whether the
+        detail 7B adds can be had without the coloured static it adds with it.
+
 # Whole-body pose control (SDPose, native to the pinned ComfyUI).
 # An ALTERNATIVE to depth, never blended with it: VACE is trained on individual
 # control representations, and an averaged mixture is an input it has never seen.
