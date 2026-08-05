@@ -98,6 +98,20 @@ sampler, geometry and reference pack cannot have drifted. All three scored
 against the held-out bank, with each frame cropped to the tracked subject before
 face detection so the other person in the shot cannot be scored by mistake.
 
+**All three ran WITHOUT `--background`, so the preserved 95.58% is the original
+frame, not a restored plate.** The three arms are still matched to each other,
+which is what the comparison below rests on, but they are not the shipped path
+and they do not look like it: the user's first observation on seeing them was
+that the quality matched the source, which is exactly what they were. The run
+log asserted "comes from the plate" regardless of the flag and was believed;
+that line now names what actually supplies the region, and `--protected` without
+`--background` warns before the GPU is touched.
+
+Whether the plate changes the LoRA verdict is untested. It should not — VACE
+regenerates the same submask either way, and the constraint identified below is
+the size of that submask, not the sharpness of what surrounds it — but "should
+not" is not a measurement.
+
 | arm | LoRA | identity vs held-out | frames with a face |
 |---|---|---|---|
 | control | none | **0.1682** | 14/16 |
@@ -143,6 +157,8 @@ consistency check exist.
 
 ## Limits
 
+- The pipeline arms carried **no restored plate** (above). Matched to each other,
+  not representative of output quality.
 - Identity here is measured on **probe generations from a portrait prompt**,
   head-on and well lit, which is the friendliest possible case. It says the LoRA
   learned the face; it does not say what happens inside the pipeline, where VACE

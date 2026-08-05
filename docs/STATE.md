@@ -95,12 +95,14 @@ identity through `identity.resolve_targets`, never `evaluate_pilot.py`'s own.
 - **A subject LoRA learns the face and still changes nothing here.** 0.023 →
   **0.5167** trained (ceiling 0.7454, real photographs), yet matched pipeline
   arms give 0.1682 without, 0.1612 with, 0.1263 at double strength — worse, and
-  fewer frames yield a detectable face. Doubling the one free parameter is what
-  makes it conclusive: **the protected path has no room for an identity prior**
-  (4.42% of the figure, pinned by control, ringed by plate).
+  fewer frames yield a detectable face. Doubling the one free parameter makes it
+  conclusive: **the protected path has no room for an identity prior** (4.42% of
+  the figure, pinned by control). Those arms carried **no plate**: `--protected`
+  without `--background` preserves the ORIGINAL everywhere but the submask, so
+  the output looks like the source. They show identity, not quality.
 - Score a LoRA **only** against the held-out split; the training bank tracks it
-  closely, which is what makes it dangerous. Its trigger token is load-bearing.
-  musubi's merge trap: `prepare_musubi_dit.py`.
+  closely, which makes it dangerous. Its trigger token is load-bearing; musubi's
+  merge trap: `prepare_musubi_dit.py`.
 - Composite in `gbrp`, not `yuv420p`; after `--protected` pass `--mask` the
   protected submask, else the garment arrives VAE-degraded.
 
@@ -194,7 +196,5 @@ smallness is now the measured reason VACE cannot be steered here.
 
 - `mask.grow=4` puts 4.51% of the dilated subject mask onto another person.
   Reduce it or rely on the occluder layer.
-- If the source face is covered, reference identity agreement is **unobservable**,
-  not a score to maximise. `covering_removed` is the metric that matters.
 - Untested: **VACE-14B**. Pose-vs-depth control and any further LoRA work matter
   only if VACE earns its place at a larger size — at 1.3B it has not.

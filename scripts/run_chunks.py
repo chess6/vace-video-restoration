@@ -276,6 +276,18 @@ def main() -> int:
         log.error("--background needs a mask: without one there is no preserved "
                   "region, so the restored plate would be regenerated over.")
         return 1
+    if args.protected and not use_bg:
+        # Not an error - a plate-free run is a legitimate ablation - but it is
+        # almost never what someone asking for --protected wants. The protected
+        # path regenerates ~4% of the figure precisely BECAUSE the plate is
+        # supposed to supply the rest; without it, 96% of the output is the
+        # unrestored original and the result looks like the source, because it
+        # nearly is. Say so at the top, where it will be read before 8 GPU
+        # minutes are spent, not inferred afterwards from how the video looks.
+        log.warning("--protected without --background: the preserved region will "
+                    "be the ORIGINAL frames, not a restored plate. The output "
+                    "will look like the source everywhere except the submask. "
+                    "Pass --background <profile> for the shipped path.")
     wf_name = graph_name(use_mask, use_ref, use_bg)
     wf_path = P.workflows / f"{wf_name}_api.json"
     if not wf_path.exists():
@@ -589,11 +601,20 @@ def main() -> int:
                         f"{c['shot_id']}: no protected submask. Run "
                         f"scripts/make_protected_mask.py --pilot first.")
                 mask = P.root / pm
+                # Name what ACTUALLY supplies the preserved region. Only the _bg
+                # graphs read the plate; without --background the other 95.58% is
+                # the original, unrestored frame. This line used to say "plate"
+                # either way, and it was believed - three arms were run, handed
+                # over, and the user's first observation was that they looked no
+                # better than the source, which is exactly what they were.
                 log.info("Regenerating the PROTECTED submask only: %.2f%% of the "
                          "figure; the remaining %.2f%% (garment, covering, every "
-                         "uncertain pixel) comes from the plate.",
+                         "uncertain pixel) comes from %s.",
                          100 * (shot["protected_mask"]["regenerable_fraction"]),
-                         100 * (shot["protected_mask"]["protected_fraction"]))
+                         100 * (shot["protected_mask"]["protected_fraction"]),
+                         f"the {args.background} plate" if use_bg
+                         else "the ORIGINAL frames - no plate, so nothing here is "
+                              "restored except the submask")
             if use_mask and not mask.exists():
                 raise FileNotFoundError(f"mask missing: {mask}. Run track_subject.py")
 
