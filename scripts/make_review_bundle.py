@@ -36,6 +36,26 @@ from common import (  # noqa: E402
 
 # What to look for in each artefact. Keyed by the name inside the archive.
 NOTES = {
+    "lora/shot0000_c000_loraB.mp4":
+        "The subject-LoRA control: no LoRA. Compare it with loraA, which is the "
+        "SAME run with a LoRA of this person's face added and nothing else "
+        "changed. The measurement says they are the same (0.168 vs 0.161 "
+        "identity against photographs the LoRA never saw). Your eye is the "
+        "discriminator here - if you can tell them apart, the metric is wrong.",
+    "lora/shot0000_c000_loraA.mp4":
+        "Subject LoRA at strength 1.0. Only 4.42% of the figure - the exposed "
+        "head - is regenerated at all; everything else is the plate.",
+    "lora/shot0000_c000_loraC.mp4":
+        "The same LoRA at strength 2.0. Measured WORSE (0.126) and a face was "
+        "detectable in fewer frames, which usually means the region is being "
+        "damaged. Look for a waxy or smeared face rather than a different one.",
+    "lora/identity_scores.json":
+        "Identity per training checkpoint, scored against the three held-out "
+        "photographs only. This is where the LoRA does work: 0.023 with no "
+        "LoRA, 0.517 at the shipped checkpoint, 0.745 for real photographs.",
+    "lora/vace_identity.json":
+        "The same measurement on the three clips above. This is where it "
+        "stops working.",
     "pilot_grid.mp4":
         "START HERE. All variants side by side, same frames. Scan for: which "
         "environment looks like the same place; whether the figure looks pasted "
@@ -127,6 +147,12 @@ def main() -> int:
 
     log = setup_logging("make_review_bundle", args.verbose)
     out = args.out or (P.outputs / "review_bundle.zip")
+    # A relative --out is resolved against the project, not the caller's cwd:
+    # the final log line calls rel(), which raises on a path outside the project
+    # AFTER the archive has been written - a crash that looks like a failed
+    # bundle when the bundle is already there, complete.
+    if not out.is_absolute():
+        out = P.root / out
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = P.intermediate / "_review_tmp"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -181,6 +207,20 @@ def main() -> int:
             for p in sorted(review.glob("*.png")):
                 zf.write(p, f"masks/{p.name}")
                 included.append((f"masks/{p.name}", p.stat().st_size))
+
+        # ---- subject-LoRA arms -------------------------------------------------
+        # These differ from each other in ONE setting, so they belong together
+        # and apart from the variants above: comparing a LoRA arm against a
+        # pilot variant would also be comparing two different prompts.
+        for v in sorted(P.restored_480p.glob("*_lora*.mp4")):
+            arc = f"lora/{v.name}"
+            sz = add_video(zf, v, arc, tmp, args.crf, args.lossless, log)
+            included.append((arc, sz))
+        for j in ("identity_scores.json", "vace_identity.json"):
+            p = P.intermediate / "lora_eval" / j
+            if p.exists():
+                zf.write(p, f"lora/{j}")
+                included.append((f"lora/{j}", p.stat().st_size))
 
         # ---- reports ----------------------------------------------------------
         for rp in ("pilot_findings.md", "pilot_metrics.json",

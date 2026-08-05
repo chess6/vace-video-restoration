@@ -45,8 +45,15 @@ VID_EXT = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
 THRESHOLD = 0.35
 
 
-def probe_media(path: Path, models, n_frames: int) -> list[np.ndarray]:
-    """Face embeddings found in one image or video."""
+def probe_media(path: Path, models, n_frames: int,
+                mask_path: Path | None = None) -> list[np.ndarray]:
+    """Face embeddings found in one image or video.
+
+    With a mask video, each frame is cropped to the tracked subject's bounding
+    box before the face model sees it. face_detail() takes the LARGEST face, and
+    this shot has another person in it - at full frame the metric would happily
+    score the wrong one and report it as identity.
+    """
     from PIL import Image, ImageOps
     from make_reference_pack import face_detail
 
@@ -66,10 +73,32 @@ def probe_media(path: Path, models, n_frames: int) -> list[np.ndarray]:
     cap.release()
     if not frames:
         return []
+
+    masks = []
+    if mask_path is not None:
+        mcap = cv2.VideoCapture(str(mask_path))
+        while True:
+            ok, m = mcap.read()
+            if not ok:
+                break
+            masks.append(cv2.cvtColor(m, cv2.COLOR_BGR2GRAY) > 127)
+        mcap.release()
+        if len(masks) < len(frames):
+            raise SystemExit(
+                f"{mask_path.name} has {len(masks)} frame(s) for "
+                f"{path.name}'s {len(frames)}. Cropping frame i by mask j is a "
+                f"measurement of nothing; refusing to guess the alignment.")
+
     idx = np.linspace(0, len(frames) - 1, min(n_frames, len(frames))).astype(int)
     out = []
     for i in idx:
-        rgb = cv2.cvtColor(frames[i], cv2.COLOR_BGR2RGB)
+        frame = frames[i]
+        if masks:
+            if masks[i].sum() < 64:
+                continue
+            ys, xs = np.where(masks[i])
+            frame = frame[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         emb, _, _ = face_detail(models, Image.fromarray(rgb))
         if emb is not None:
             out.append(emb)
@@ -105,6 +134,10 @@ def main() -> int:
                     help="Where make_lora_dataset.py wrote dataset.json")
     ap.add_argument("--frames", type=int, default=8,
                     help="Frames probed per video")
+    ap.add_argument("--mask", type=Path, default=None,
+                    help="Subject mask video. Videos are cropped to it before "
+                         "face detection, so another person in frame cannot be "
+                         "scored as the subject. Ignored for still images.")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
@@ -166,7 +199,7 @@ def main() -> int:
             continue
         sims, sims_train, n_probed = [], [], 0
         for f in files:
-            for emb in probe_media(f, models, args.frames):
+            for emb in probe_media(f, models, args.frames, args.mask):
                 n_probed += 1
                 sims.append(float(np.max(hold_bank @ emb)))
                 if train_bank is not None:
