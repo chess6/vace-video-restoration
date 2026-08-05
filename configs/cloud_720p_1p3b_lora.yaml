@@ -1,0 +1,40 @@
+# The subject-LoRA experiment, as a difference from the 720p profile.
+#
+# `extends` exists so this file can BE the experiment: two fields, both of them
+# the point. Copying the whole profile to change a LoRA name is how two configs
+# that are meant to be identical stop being identical, and the pilot already
+# lost time to a run that recorded one setting while using another.
+extends: cloud_720p_1p3b.yaml
+
+profile: cloud_720p_1p3b_lora
+
+model:
+  # Trained by scripts/train_subject_lora.sh on the 9 held-in reference crops,
+  # 2520 steps. Scored 0.5167 median identity against the 3 held-out
+  # photographs, which the training never saw; the no-LoRA baseline scored
+  # 0.0226 and real photographs of the same person score 0.7454 on the same
+  # measurement. Provenance and the full curve: reports/lora_results.md.
+  #
+  # Trained against Wan2.1 T2V 1.3B, applied to VACE 1.3B. All 300 modules bind
+  # (scripts/verify_lora_loads.py) because VACE is that backbone plus its own
+  # blocks - which the LoRA does not touch.
+  lora:
+    name:            subject_1p3b_v2.safetensors
+    strength:        1.0
+
+prompt:
+  # The trigger token, and it is not decoration: the captions in the training
+  # set were this token and nothing else, so the LoRA does approximately nothing
+  # unless the prompt says it. A run with the LoRA loaded and the token missing
+  # looks exactly like a LoRA that did not work.
+  #
+  # Otherwise identical to the base profile's positive prompt, word for word.
+  # The control config differs from this file in the LoRA and NOTHING else, so
+  # the token is present in both arms and cannot explain a difference between
+  # them.
+  positive: >-
+    ohwx person, the same person, identical face and facial features, identical hairstyle and hair colour,
+    identical clothing with the same garments, colours, patterns, textures and accessories,
+    consistent body proportions and silhouette, natural skin texture and fabric detail,
+    sharp accurate detail, following the original pose, motion, lighting direction and
+    camera perspective, matching the surrounding scene

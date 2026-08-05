@@ -1,0 +1,19 @@
+# The control arm for the subject-LoRA experiment.
+#
+# It extends the LoRA config rather than the base profile, which is the whole
+# design: the prompt, the seed, the sampler, the geometry and the reference pack
+# cannot drift apart from the treatment arm, because they are not restated here.
+# The single difference below is the difference being measured.
+#
+# Without this arm the comparison would be against the base profile, whose
+# prompt lacks the trigger token - and then a difference in the result could be
+# the LoRA or could be one extra token in a sixty-word prompt, with no way to
+# tell which. The 1.3B pilot already measured that this model responds to a
+# conditioning change of about that size (reports/pilot_results.md).
+extends: cloud_720p_1p3b_lora.yaml
+
+profile: cloud_720p_1p3b_lora_control
+
+model:
+  lora:
+    name:            ""

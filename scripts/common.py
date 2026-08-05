@@ -257,13 +257,52 @@ def setup_logging(name: str, verbose: bool = False) -> logging.Logger:
 # Config
 # ---------------------------------------------------------------------------
 
+def _deep_merge(base: dict, over: dict) -> dict:
+    """`over` wins, recursively, and only where it actually says something."""
+    out = dict(base)
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 def load_config(path: str | Path | None = None) -> dict:
+    """Load a config, resolving a single `extends:` chain first.
+
+    An experiment usually differs from a profile in one or two fields - a LoRA
+    switched on, a token added to the prompt - and copying three hundred lines
+    to change one of them is how two configs that are supposed to be identical
+    stop being identical. `extends: <file>` states the difference instead, so a
+    reader can see the entire experiment at a glance and a later fix to the base
+    profile reaches every experiment derived from it.
+
+    The merge is deep and the deriving file wins, so a nested key can be
+    overridden without restating its siblings.
+    """
     path = Path(path) if path else P.configs / "local_1p3b.yaml"
     if not path.is_absolute():
         path = PROJECT_ROOT / path
     with open(path) as f:
         cfg = yaml.safe_load(f)
+
+    seen = [path]
+    while cfg.get("extends"):
+        parent = Path(cfg.pop("extends"))
+        if not parent.is_absolute():
+            parent = (path.parent / parent) if (path.parent / parent).exists() \
+                else (P.configs / parent)
+        if parent in seen:
+            raise ValueError(f"config `extends` loops: {' -> '.join(str(p) for p in seen)} -> {parent}")
+        seen.append(parent)
+        with open(parent) as f:
+            base = yaml.safe_load(f)
+        cfg = _deep_merge(base, cfg)
+
     cfg["_config_path"] = str(path)
+    if len(seen) > 1:
+        cfg["_config_chain"] = [str(p) for p in seen]
     validate_config(cfg)
     return cfg
 
