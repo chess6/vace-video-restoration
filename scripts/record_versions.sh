@@ -74,6 +74,36 @@ echo "| \`openai/clip-vit-large-patch14\` | appearance / clothing ReID embedding
 echo "| \`depth-anything/Depth-Anything-V2-Large-hf\` | depth structural control |"
 echo "| \`insightface buffalo_l\` (ArcFace) | face identity embedding |"
 echo
+echo "## Subject-LoRA training (musubi-tuner)"
+echo
+MUSUBI_DIR="${MUSUBI_DIR:-/workspace/musubi-tuner}"
+WAN_TRAIN_MODELS="${WAN_TRAIN_MODELS:-/workspace/wan_train_models}"
+if [ -d "$MUSUBI_DIR/.git" ]; then
+  echo "| Component | Source | Commit / version |"
+  echo "|---|---|---|"
+  echo "| musubi-tuner | https://github.com/kohya-ss/musubi-tuner | \`$(git -C "$MUSUBI_DIR" rev-parse HEAD)\` ($(git -C "$MUSUBI_DIR" describe --tags --always 2>/dev/null)) |"
+  echo
+  echo "Trainer weights are a SEPARATE set from the pipeline's, and deliberately so:"
+  echo "musubi has no VACE task, and rejects the fp8_scaled text encoder ComfyUI uses."
+  echo "The VAE is shared, not duplicated."
+  echo
+  echo "| File | Bytes | SHA256 | Source |"
+  echo "|---|---|---|---|"
+  for spec in \
+    "$WAN_TRAIN_MODELS/split_files/diffusion_models/wan2.1_t2v_1.3B_bf16.safetensors|https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_t2v_1.3B_bf16.safetensors" \
+    "$WAN_TRAIN_MODELS/models_t5_umt5-xxl-enc-bf16.pth|https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B/resolve/main/models_t5_umt5-xxl-enc-bf16.pth" ; do
+    f="${spec%%|*}"; url="${spec##*|}"
+    if [ -f "$f" ]; then
+      echo "| \`$(basename "$f")\` | $(stat -c%s "$f") | \`$(sha256sum "$f" | cut -c1-16)…\` | $url |"
+    else
+      echo "| \`$(basename "$f")\` | MISSING | - | $url |"
+    fi
+  done
+else
+  echo "musubi-tuner is not installed on this machine (\`$MUSUBI_DIR\`), so no"
+  echo "training versions are recorded here. It lives on the rented GPU box."
+fi
+echo
 echo "## Deliberately NOT installed"
 echo
 echo "- Wan2.1-VACE-**14B** weights — will not fit 12 GB; see \`configs/cloud_14b.yaml\`"
