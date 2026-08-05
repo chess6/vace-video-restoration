@@ -145,7 +145,14 @@ def composite(subject: Path, background: Path, mask: Path, out: Path,
     ff = subprocess.Popen(
         ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
          "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
-         "-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuv420p", "-an", str(out)],
+         # gbrp, not yuv420p: the compositor works in RGB, so an RGB-native
+         # pixel format is the only one that survives the write. This is what
+         # makes "the background is bit-exact by construction" actually true.
+         # Measured on the pilot, fraction of alpha==0 pixels equal to the plate:
+         #   yuv420p 0.034 (mean |d| 3.33)   yuv444p 0.387 (0.61)   gbrp 1.000 (0.00)
+         # Chroma subsampling was only part of it; 8-bit RGB->YUV is not
+         # reversible either, so 4:4:4 alone does not fix it.
+         "-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp", "-an", str(out)],
         stdin=subprocess.PIPE)
 
     n = 0
@@ -215,6 +222,11 @@ def main() -> int:
     ap.add_argument("--subject", type=Path, required=True, help="VACE output to cut from")
     ap.add_argument("--background", type=Path, required=True, help="Restored plate")
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--mask", default=None,
+                    help="Alpha source. Defaults to the chunk's subject mask. "
+                         "After a --protected generation pass the protected "
+                         "submask instead, so only the regenerated region comes "
+                         "from VACE and the rest stays the plate.")
     ap.add_argument("--band-px", type=int, default=None)
     ap.add_argument("--occluders", type=Path, default=None,
                     help="Foreground mask kept ABOVE the generated figure. "
@@ -234,7 +246,14 @@ def main() -> int:
     if c is None:
         log.error("Unknown chunk %s", args.chunk)
         return 1
-    mask = P.root / c["mask_path"]
+    # The alpha source must match what VACE was actually allowed to regenerate.
+    # After a --protected run that is the protected submask, NOT the full subject
+    # mask: compositing on the subject mask takes the whole figure from the VACE
+    # output, so the garment arrives as a VAE round-trip of the plate rather than
+    # the plate itself. Measured on the 720p pilot, gradient in the garment
+    # region: plate 1.837, subject-mask composite 1.690 (-8.0%), protected-submask
+    # composite 1.850 (parity).
+    mask = Path(args.mask).resolve() if args.mask else P.root / c["mask_path"]
     for name, p in (("subject", args.subject), ("background", args.background),
                     ("mask", mask)):
         if not p.exists():
