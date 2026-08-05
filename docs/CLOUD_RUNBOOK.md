@@ -16,10 +16,27 @@ RunPod's SSH proxy has two quirks that make an ordinary `ssh host 'command'`
 fail in confusing ways:
 
 1. **It refuses a session without a PTY.** `ssh` only allocates one when it has
-   a real terminal, which an agent or a script does not. Wrap it: `script -qec
-   "ssh runpod" /dev/null`.
+   a real terminal, which an agent or a script does not. `ssh -tt` forces one and
+   is the portable fix. (`script -qec "ssh runpod" /dev/null` also works, but that
+   is GNU syntax — macOS's BSD `script` takes `script -q /dev/null <cmd>`.)
 2. **It starts an interactive login shell and ignores a remote command passed as
-   an argument.** The command must arrive on **stdin**.
+   an argument.** The command must arrive on **stdin**. The login shell then
+   echoes every command back with prompts and bracketed-paste escapes, so send
+   `stty -echo; PS1=""` first or the transcript is unparseable.
+3. **It has no sftp subsystem**, so `scp` and `sftp` both fail against it with
+   `subsystem request failed on channel 0`. It can only run commands.
+
+**Use the direct TCP endpoint for file transfer.** The pod also runs a real sshd,
+reachable at `$RUNPOD_PUBLIC_IP:$RUNPOD_TCP_PORT_22` (both readable from the pod's
+environment, over the proxy). It supports `scp`, and accepts remote commands as
+ordinary arguments — none of the quirks above apply. It authenticates against
+`/root/.ssh/authorized_keys`, which the proxy's account-level key registration does
+**not** populate, so append the public key there once, through the proxy.
+
+The pod's injected `RUNPOD_*` environment variables are visible over the proxy but
+**not** over direct TCP, whose sshd does not inherit the container environment.
+Read them over the proxy. Never print `RUNPOD_API_KEY` — it is an account-wide
+credential; reference it by name.
 
 Also required in `~/.ssh/config`: `IdentitiesOnly yes`. Without it `ssh` offers
 every key in the agent, and the proxy closes the connection before reaching the
@@ -61,13 +78,19 @@ from the wrong-person track.
 
 All of these are enforced in code, not by memory:
 
-- the run's exclusion list is present and non-empty (untracked, run-local);
 - the tracking overlay has been reviewed by a human and approved —
   `scripts/approve_tracking.py`, bound to the mask's content hash;
 - `subject_status == needs_user` blocks generation outright;
 - clothing and any face covering are protected — `make_protected_mask.py` runs
   before the reference pack, because the pack's face gating depends on its
   verdict and fails closed without it.
+
+**Not a gate, despite an earlier revision of this document saying so:** the run's
+exclusion list, `intermediate/reference_exclusions.txt`. `identity.load_exclusions`
+returns an empty set when the file is absent, and nothing anywhere requires it to
+be non-empty. Keeping a reference out of identity work is therefore a deliberate
+act with no reminder attached — an empty list means every image in
+`inputs/references/` is a candidate.
 
 Verify with `scripts/run_chunks.py --pilot --protected --dry-run`, which runs
 every check and stops before touching the GPU. **Use it.** Confirming a guard by
@@ -102,9 +125,38 @@ changes that.
 
 ## Teardown
 
+**Standing instruction from the user: terminate the pod whenever it is not
+actively needed, without asking.** That includes the long idle stretch while a
+human reviews a bundle — a gate like tracking approval can take hours, and the
+box bills by the second throughout. Copy back, verify, terminate, and recreate
+when there is something to run. Re-establishing access to a new pod costs about
+a minute: update `HostName`/`Port`/`User`, and reinstall the public key in
+`/root/.ssh/authorized_keys`, which does not live on the volume.
+
 Terminate the GPU pod **immediately** after copying outputs back — it bills by
 the second and an idle box after a run is pure waste. Keep the network volume
 only if more runs are planned; it bills separately and holds the weights, so
 deleting it means re-downloading them.
+
+`runpodctl` ships on the pod but is **not** authenticated — `runpodctl get pod`
+returns `API key not found` and `~/.runpod/config.toml` is a stub. Configure it
+from the pod's own injected key, over the proxy so the variable is in scope, and
+without ever echoing the value:
+
+```bash
+runpodctl config --apiKey "$RUNPOD_API_KEY"
+runpodctl stop pod   "$RUNPOD_POD_ID"   # coming back to it later
+runpodctl remove pod "$RUNPOD_POD_ID"   # finished with it
+```
+
+**Stop, don't remove, when the box is wanted again.** A stopped pod keeps its
+container and its SSH identity, so restarting it costs no re-setup, whereas a
+removed pod means a new host, port and user, and reinstalling the public key in
+`/root/.ssh/authorized_keys`. Removing is right only when the work is finished.
+GPU billing stops either way; a stopped pod still bills a small amount for its
+container disk.
+
+Copy everything back and verify it **before** this: terminating ends your access,
+and an unverified copy is not a copy (rule 4).
 
 Copy back: generated variants, metrics, reports, review bundle. Not the weights.

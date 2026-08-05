@@ -1,0 +1,302 @@
+# 720p native profile for a 4:3 source, on rented 24 GB hardware.
+#
+# Derived from local_1p3b.yaml. The one change that matters is the geometry:
+# 960x720 is exact 4:3 and both axes are multiples of 16.
+#
+# Why: background.target_short_edge is 720, so SeedVR2 already restores at a
+# 720-pixel short edge. At the old 720x544 working geometry its output was then
+# resampled DOWN to a 544 short edge - a ~24% linear downsample of exactly the
+# detail the stage exists to produce - and assemble.py --deliver 720p later
+# scaled it back UP. At 960x720 the plate maps 1:1 and neither resample happens.
+#
+# VACE at this size is 1.76x the pixels of 720x544 and attention is quadratic in
+# tokens; it peaked at 16.7 GB of 24.5 GB at the smaller size, so it may not fit.
+# The plate stage is the one that carries the quality here and is the priority.
+#
+# This profile is for setup, testing and quality validation only. Production 720p
+# is expected to run from configs/cloud_14b.yaml on rented hardware.
+#
+# Constraints below are NOT guesses. They were read from the installed ComfyUI
+# revision, ComfyUI/comfy_extras/nodes_wan.py, class WanVaceToVideo:
+#   * length  : io.Int.Input("length", default=81, min=1, step=4)  -> valid = 4n+1
+#   * width   : step=16   -> must be a multiple of 16
+#   * height  : step=16   -> must be a multiple of 16
+#   * masks   : inactive = control_video * (1 - mask)
+#               reactive = control_video * mask
+#               => WHITE (1.0) = REGENERATE, BLACK (0.0) = PRESERVE
+#   * reference_image is indexed [:1] -> only ONE image is consumed, which is why
+#     references are composited into a single sheet.
+
+profile: cloud_720p_1p3b
+
+model:
+  diffusion_model: wan2.1_vace_1.3B_fp16.safetensors
+  text_encoder:    umt5_xxl_fp8_e4m3fn_scaled.safetensors
+  vae:             wan_2.1_vae.safetensors
+  # umt5 xxl in ComfyUI is loaded via CLIPLoader with type "wan"
+  clip_type: wan
+  weight_dtype: default          # fp16 model; ComfyUI picks fp16 on sm_86
+
+video:
+  # Wan 2.1 is trained at 16 fps. The VACE working stream is resampled to this.
+  # The ORIGINAL fps is preserved separately in the manifest for audio sync.
+  model_fps: 16
+  # Target generation size. Both must be multiples of 16.
+  # 832x480 suits 16:9 sources; use 640x480 for 4:3. `preprocess_source.py`
+  # will warn (and can auto-pick) if this does not match the real source AR.
+  width: 960
+  height: 720
+  # Scale-and-pad, never distort.
+  fit_mode: pad
+  pad_color: black
+  # Frames per inference chunk. MUST satisfy 4n+1.
+  chunk_frames: 81
+  # Frames shared between adjacent chunks, used for seam blending.
+  # Not constrained to 4n+1. Must be < chunk_frames.
+  chunk_overlap: 8
+  # Chunks never span a hard scene cut; a shot shorter than this is padded/held.
+  min_shot_frames: 17
+
+scene_detect:
+  # PySceneDetect ContentDetector. Lower = more sensitive.
+  threshold: 27.0
+  min_scene_len_frames: 16
+
+# ---------------------------------------------------------------------------
+# Background restoration (SeedVR2)
+# ---------------------------------------------------------------------------
+# A full-frame restoration pass that runs BEFORE VACE and produces the plate the
+# subject is composited onto. It restores the environment - walls, floor, props,
+# distant people, signage - which VACE is deliberately not asked to touch.
+#
+# Everything structural is still derived from the ORIGINAL normalized stream:
+# scene cuts, chunk timing, depth, masks and subject tracking never see SeedVR2
+# output. Only the *pixels VACE preserves* come from here. That keeps the
+# geometry the model follows identical between profiles, so a background profile
+# can be changed without re-running detection or tracking.
+#
+# Constraints read from the installed ComfyUI revision,
+# ComfyUI/comfy_extras/nodes_seedvr.py:
+#   * SeedVR2Preprocess pads to a multiple of 16 in both axes and to 4n+1 frames
+#   * SeedVR2TemporalChunk frames_per_chunk has step=4 (default 21)
+#   * SeedVR2PostProcessing colour-matches the result to the pre-upscale frames
+background:
+  enabled: true
+  # 3B in fp8 only. The 7B model will not fit this 12 GB card and is never
+  # selected locally; see configs/cloud_14b.yaml for the rented-hardware profile.
+  model: seedvr2_3b_fp8_e4m3fn.safetensors
+  vae: seedvr2_ema_vae_fp16.safetensors
+  weight_dtype: fp8_e4m3fn
+  # VRAM-safe temporal batching. SeedVR2 holds the whole clip in latent space, so
+  # an 81-frame chunk is split, sampled and merged with a crossfade rather than
+  # attempted in one pass.
+  chunking_mode: manual         # manual = reproducible; auto = size to free VRAM
+  frames_per_chunk: 21          # PIXEL frames, must be 4n+1 (checked by the node)
+  # LATENT frames shared between adjacent temporal chunks, crossfaded by
+  # SeedVR2TemporalMerge. One latent frame is four pixel frames, and the node
+  # clamps this to (frames_per_chunk-1)/4, so 1 is a 4-pixel-frame crossfade.
+  temporal_overlap: 1
+  # VAE tiling keeps the encode/decode peak bounded independently of frame size.
+  vae_tile_size: 512
+  vae_tile_overlap: 64
+  # The short edge SeedVR2 restores at. The result is resampled back to the
+  # working-stream geometry, so this does not change any downstream dimension.
+  target_short_edge: 720
+
+  profiles:
+    # Structural and temporal fidelity first. Fewer steps and a strong colour
+    # match to the original keep the environment recognisably the same place;
+    # the aim is a cleaner version of what is there, not a new scene.
+    background_conservative:
+      steps: 12
+      cfg: 1.0
+      denoise: 0.75
+      color_correction: lab      # most faithful of the installed methods
+      description: >-
+        Prioritises structural and temporal fidelity. Least likely to invent
+        detail, alter signage or mutate distant faces.
+
+    # More plausible environmental detail, accepting more invention. Use when the
+    # source is degraded enough that faithful restoration still looks broken.
+    background_aggressive:
+      steps: 25
+      cfg: 1.0
+      denoise: 1.0
+      color_correction: wavelet  # keeps generated high-frequency detail
+      description: >-
+        Reconstructs stronger plausible environmental detail. Expect more
+        invented texture, and check signage and distant faces before trusting it.
+
+# Whole-body pose control (SDPose, native to the pinned ComfyUI).
+# An ALTERNATIVE to depth, never blended with it: VACE is trained on individual
+# control representations, and an averaged mixture is an input it has never seen.
+pose:
+  enabled: true
+  model: sdpose_wholebody_fp16.safetensors
+  batch_size: 8
+  draw_body: true
+  draw_hands: true      # the reason this profile exists: contact and gesture
+  draw_face: true
+  draw_feet: true
+  draw_head: true
+  stick_width: 4
+  face_point_size: 3
+  score_threshold: 0.3
+
+control:
+  # Structural control profile. Depth is the baseline because the goal is to keep
+  # the whole figure's shape, volume and motion, not just facial landmarks.
+  #
+  #   depth  (default)  Depth Anything V2 Large. Carries volume and occlusion.
+  #   canny             scripts/make_depth.py --mode canny. No model, no VRAM.
+  #                     Silhouette and creases only, no volume. Kept for
+  #                     comparison; do not switch to it without testing.
+  #   pose              SDPose whole-body (body + hands + face), native to the
+  #                     pinned ComfyUI revision. Carries articulation and hand
+  #                     position, which depth alone renders poorly at this
+  #                     source resolution, but discards clothing silhouette.
+  #                     Compared against depth rather than blended with it: the
+  #                     model is not trained on an arbitrary mixture.
+  #
+  # Whatever profile is used fills the same slot in the manifest (depth_path) and
+  # the same workflow input, so switching does not change the graph.
+  profile: depth
+  canny_low: 80
+  canny_high: 160
+
+sampling:
+  seed: 20260803
+  steps: 25
+  cfg: 5.0
+  sampler: uni_pc
+  scheduler: simple
+  denoise: 1.0
+  # WanVaceToVideo "strength": how strongly the VACE control stream binds.
+  vace_strength: 1.0
+
+# How the regenerated subject meets the restored background.
+#
+# Two integration paths exist, and scripts/make_comparisons.py measures both:
+#   in_vace   VACE preserves the SeedVR2 plate itself, because control_video
+#             outside the mask IS the background. One pass, no seam, but it
+#             trusts the model to leave the preserved region alone.
+#   composite The subject is cut from the VACE output and laid over the SeedVR2
+#             plate afterwards using the lossless mask. The background is then
+#             bit-exact, at the cost of a real edge to manage.
+#
+# The band is deliberately narrow: a wide ramp is what produces halos and the
+# pasted-on look around hair and clothing edges. Feathering happens exactly once
+# on each path - the workflow's FeatherMask for in_vace, this band for composite.
+# Region-of-interest generation.
+#
+# The figure occupies a small part of a 320x240 source, so full-frame generation
+# spends nearly all of its capacity on background it was asked to preserve.
+# Cropping to the subject and scaling that crop to the same canvas gives the
+# figure several times the pixels for the same compute.
+#
+# Every value here trades subject resolution against context and stability. More
+# zoom means more detail on the face and garments but less of the scene the model
+# needs in order to get an interaction right, and a tighter crop is more prone to
+# visible jitter.
+roi:
+  enabled: true
+  # Fraction of the CROP height the figure should fill. The brief asks for
+  # 60-80%; the planner aims at the lower bound and reports what it achieved,
+  # because guaranteeing the upper bound would clip context on wide poses.
+  # Aim at the TOP of the range, not the bottom. At 0.60 a subject that already
+  # fills 60% of the frame yields a 1.00x crop and the stage is pointless; at
+  # 0.78 the same subject still yields ~1.3x, which is real extra resolution.
+  target_height_fraction: 0.78
+  target_height_fraction_max: 0.80
+  # Percentile of per-frame subject height used to fix the shot's single scale.
+  # Not the max: one frame with a raised arm would otherwise shrink every frame.
+  height_percentile: 90
+  # Percentile of per-frame box size the crop must still contain. Using the max
+  # here lets one outlier frame force a full-frame crop and cancel the zoom.
+  containment_percentile: 95
+  # Below this scale the crop is not worth the extra machinery, and the script
+  # says so rather than pretending a 1.02x crop achieved something.
+  min_useful_scale: 1.15
+  # Extra room around the subject for hands, contacted objects, the person being
+  # interacted with, and the contact shadow.
+  # Context kept around the subject box. Tightening this is what buys the zoom,
+  # so it is validated rather than assumed: check_context() below measures how
+  # much of the mask, and of any interacting person or held object, actually
+  # survives the crop, and the ROI is rejected if too much is lost.
+  context_margin: 0.18
+  # Reject the ROI if more than this fraction of subject pixels falls outside the
+  # crop on any frame - clipping a hand is worse than a softer image.
+  max_subject_clip: 0.02
+  # Reject if the crop moves more than this per frame: visible jitter after
+  # upscaling costs more than the resolution gained.
+  max_crop_motion_px: 3.0
+  # Zero-phase smoothing window, in frames, for the crop centre.
+  smooth_frames: 15
+  # Ignore crop movement below this many pixels, so a still subject gets a
+  # genuinely still crop. Jitter is very visible after upscaling.
+  deadband_px: 2.0
+  # Shift the box up slightly: the head carries identity, the feet rarely do.
+  vertical_bias: 0.05
+
+composite:
+  # Path choice. `composite` was measured to hold the plate far better and to
+  # have the tighter edge on an EARLIER clip and an earlier build of this
+  # pipeline. Those numbers are not reproduced here and must not be quoted as
+  # current: re-measure with scripts/evaluate_pilot.py on the interval you care
+  # about before treating this as settled.
+  path: composite               # in_vace | composite
+  band_px: 3                    # width of the alpha ramp across the subject edge
+  # Erode the hard mask by half the band before ramping, so the ramp straddles
+  # the true silhouette instead of eating into the subject.
+  center_band: true
+  # Layer 3 - the foreground kept ABOVE the generated figure. Its pixels come
+  # from the restored plate, so an occluder still gains SeedVR2's detail without
+  # ever passing through VACE.
+  #
+  # The boundary is ONE-SIDED: the ramp lies entirely inside the occluder, so it
+  # can only lose it a sliver, never let the generated figure spread over whoever
+  # is in front. The core stays fully opaque.
+  occluder_band_px: 2
+  # Carry this fraction of the previous frame's foreground alpha. The occluder is
+  # re-segmented every frame and its edge lands differently each time; a little
+  # carry-over stops that crawling. Keep it low - too much drags a ghost behind a
+  # fast-moving occluder. 0 disables it.
+  occluder_temporal_smooth: 0.35
+
+mask:
+  # Feather radius in pixels applied to the tracked figure mask.
+  feather: 6
+  # Dilate the tracked mask before feathering, so the silhouette edge and a little
+  # contact shadow fall inside the regenerated region.
+  grow: 4
+  # WHITE = regenerate. The tracker writes subject=white by default.
+  polarity: white_is_regenerate
+
+prompt:
+  positive: >-
+    the same person, identical face and facial features, identical hairstyle and hair colour,
+    identical clothing with the same garments, colours, patterns, textures and accessories,
+    consistent body proportions and silhouette, natural skin texture and fabric detail,
+    sharp accurate detail, following the original pose, motion, lighting direction and
+    camera perspective, matching the surrounding scene
+  negative: >-
+    different person, face swap, changed identity, changed clothing, changed colours,
+    redesigned outfit, new background, altered scene, extra limbs, extra fingers,
+    deformed hands, distorted anatomy, duplicated body parts, warping, morphing,
+    flickering, ghosting, blurry, low quality, jpeg artifacts, oversaturated,
+    cartoon, anime, painting, illustration, text, watermark, caption, logo, border
+
+output:
+  # fps of the restored 480p master before any interpolation stage
+  fps: 16
+  # Intermediate chunk outputs are kept lossless so seam blending does not compound
+  # generation loss. The final master is high-quality H.264.
+  chunk_codec: ffv1
+  master_crf: 14
+  master_preset: slow
+
+runtime:
+  comfy_host: 127.0.0.1
+  comfy_port: 8188
+  # Refuse to run if the GPU is not visible. Never silently fall back to CPU.
+  require_cuda: true

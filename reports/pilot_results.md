@@ -1,11 +1,10 @@
 # Pilot results
 
-> **Status: NOT YET RUN.** This is the scoring template. It will be filled in
-> after the first pilot on real footage. A pilot cannot be run until the source
-> video and reference images exist — see `NEEDS_USER.md`.
->
-> Do not treat a clean exit code as success. The only thing that matters here is
-> what the output actually looks like.
+> **Status: RUN**, at 960x720 on rented 48 GB hardware.
+> Filled in from measurement. The agent that ran it may not view the footage
+> (rule 1), so perceptual rows are marked **needs human** rather than guessed;
+> numeric rows are measured and reproducible. Where the user judged something by
+> eye, that is attributed to them.
 
 ---
 
@@ -13,142 +12,163 @@
 
 | Field | Value |
 |---|---|
-| Date | _to fill_ |
-| Config | `configs/local_1p3b.yaml` |
-| Model | `wan2.1_vace_1.3B_fp16.safetensors` |
-| Resolution | _to fill_ |
-| Pilot segment | _source seconds, frames_ |
-| Chunk(s) | _to fill_ |
+| Date | 2026-08-05 |
+| Config | `configs/cloud_720p_1p3b.yaml` (960x720, exact 4:3, no padding) |
+| Models | `wan2.1_vace_1.3B_fp16` + SeedVR2 3B fp8 plate |
+| Pilot segment | the five-second pilot interval, one shot, 1 x 81-frame chunk |
 | Steps / cfg / sampler | 25 / 5.0 / uni_pc |
-| Seeds compared | _primary, secondary_ |
-| Seconds per generated frame | _from reports/benchmark.json_ |
-| Peak VRAM | _to fill_ |
+| Seed | 20260803 (single seed; no second-seed run) |
+| Hardware | 48 GB card, 128 vCPU, 503 GB RAM |
 
-## Variants generated
+## Measured results
 
-### A. Reference / seed ablations (subject only)
+### Plate: the profile choice dominates everything else
 
-| # | Variant | Command |
+Gradient magnitude, normalised to the unrestored working stream. Named for what
+it measures: ringing and noise raise it too.
+
+| stream | gradient | vs source |
 |---|---|---|
-| 1 | depth + reference + subject mask | `run_chunks.py --pilot` |
-| 2 | no reference conditioning | `run_chunks.py --pilot --no-reference --tag noref` |
-| 3 | reference-conditioned, second seed | `run_chunks.py --pilot --seed 987654 --tag seedB` |
+| source | 2.694 | - |
+| conservative, old geometry, resampled up | 3.254 | +20.8% |
+| conservative, native 960x720 | 3.285 | +21.9% |
+| **aggressive, native 960x720** | **3.690** | **+36.9%** |
 
-### B. Background restoration comparison
+Native geometry is nearly free (1m26s vs 1m28s, same VRAM) because
+`target_short_edge` is already 720 and the result was previously being resampled
+to a 544 short edge and then scaled up again at delivery. But it recovered only
++1.1 points. **The aggressive profile is the real lever**, at +45 s.
 
-All eight share one interval, mask, depth, reference sheet, prompt and VACE seed.
-Built by `scripts/run_pilot_comparison.sh`, measured by `scripts/evaluate_pilot.py`.
+User's judgement on the four-way: aggressive is clearly the best; the result
+reads as "between 480p and 720p", plausible surface detail, **eyes unresolved**.
 
-| # | Variant | What it isolates |
+### VACE: measurably negative at 1.3B
+
+Everything below shares one plate, mask, seed and geometry. Only conditioning
+differs. Head submask = the 4.42% VACE regenerates.
+
+| variant | gradient in head | identity (cosine to the bank) |
 |---|---|---|
-| 1 | `lanczos_original` | the baseline everything must beat |
-| 2 | `seedvr2_conservative` | background restoration alone, fidelity-first |
-| 3 | `seedvr2_aggressive` | background restoration alone, detail-first |
-| 4 | `vace_over_original` | subject replacement with no background stage |
-| 5 | `vace_pathA_conservative` | VACE preserves the conservative plate itself |
-| 5b | `vace_pathB_conservative` | same subject composited onto that plate |
-| 6 | `vace_pathA_aggressive` | VACE preserves the aggressive plate itself |
-| 6b | `vace_pathB_aggressive` | same subject composited onto that plate |
+| **plate alone (no VACE)** | **1.618** | **0.2071** |
+| source, unrestored | - | 0.1972 |
+| VACE, no reference | 1.311 | 0.1897 |
+| VACE, whole-photo sheet | 1.239 | 0.1717 |
+| VACE, identity-only pack | 1.263 | 0.1742 |
 
-Artefacts: `outputs/comparisons/*.mkv`, `outputs/comparisons/pilot_grid.mp4`,
-metrics in `reports/pilot_metrics.json`, costs in `reports/pipeline_estimates.md`.
+**The plate alone wins on both metrics.** Every VACE variant is softer than what
+it replaces and scores *lower* on identity than the untouched source.
+
+Caveat: `identity.py` treats 0.35 as the threshold for a plausible match. Every
+value here is far below it, so no variant resolves identity at all - these are
+degrees of failure, not of success. The ordering is nonetheless consistent
+across two independent metrics.
+
+### The conditioning ablation
+
+Mean absolute difference inside the head, out of 255:
+
+| pair | difference |
+|---|---|
+| no-reference vs identity pack | 6.61 |
+| no-reference vs whole-photo sheet | 6.58 |
+| **whole-photo sheet vs identity pack** | **1.89** |
+
+Removing the reference entirely moves the face by 6.6/255. Exchanging two
+radically different sheets moves it by 1.89. **The model responds to the
+presence of a reference image, not to its content.** Improving reference
+material therefore cannot pay at this model size, and that includes generating
+better ones.
+
+### Regenerating the garment is wrong under any conditioning
+
+| garment region | gradient | vs plate |
+|---|---|---|
+| plate (ground truth) | 1.837 | - |
+| full-subject, whole-photo sheet | 2.011 | 33.11 |
+| full-subject, identity-only pack | 1.203 | 35.82 |
+
+With the wardrobe left in the references the model invents confident, wrong
+detail (user: "totally hallucinated"). With it segmented out the model has no
+garment information at all and produces mush, 35% under the plate, and lands
+*further* from the plate than before. The authority split was right: the garment
+must come from the source, never be regenerated.
 
 ---
 
 ## Evaluation
 
-Score each 1–5 (1 = unusable, 3 = acceptable, 5 = excellent). Judge by watching
-the side-by-side, not by reading logs.
-
 | Criterion | Score | Notes |
 |---|---|---|
-| **Facial identity** — is it recognisably the same person? | | |
-| **Non-facial identity** — hair, build, posture, gait | | |
-| **Clothing accuracy** — garments, colours, patterns | | |
-| **Accessory accuracy** — bags, jewellery, glasses, logos | | |
-| **Silhouette and body proportions** | | |
-| **Temporal flicker** — does detail crawl or pop between frames? | | |
-| **Motion preservation** — does it follow the original motion? | | |
-| **Background drift** — is the unmasked scene actually unchanged? | | |
-| **Mask-edge halos** — visible seam around the figure? | | |
-| **Duplicated limbs / fingers** | | |
-| **Invented detail** — plausible but wrong texture or objects | | |
-| **Duration and audio sync** | | |
+| Facial identity | 1 | measured 0.17-0.21 cosine, below the 0.35 threshold, worse than the source |
+| Non-facial identity | needs human | |
+| Clothing accuracy | n/a on the retained path | garment never regenerated; 95.58% comes from the plate |
+| Silhouette | n/a | plate-supplied |
+| Temporal flicker | needs human | no frozen or dropped frames |
+| Motion preservation | 4 | mask tracks motion, r=+0.72 against temporal variance |
+| Background drift | 5 | `bg_preserved_exact` = 1.0000 after the `gbrp` fix |
+| Mask-edge halos | needs human | 3 px centred band |
+| Duration and audio sync | 5 | 81 frames at 16 fps, decoded and counted |
 
-### Background-specific criteria (variants 2-6)
+### The integration decision - settled, Path B
 
-Score per variant. `evaluate_pilot.py` gives a measured number for several of
-these; the score is still yours, because a metric cannot tell you whether an
-invented shop sign matters.
+| | Path A (`in_vace`) | Path B (`composite`) |
+|---|---|---|
+| `bg_preserved_exact` | 0.034 | **1.0000** |
+| gradient vs plate | -5.8% | -1.5% |
+| edge cost in the 3 px band | none | 2.50 / 255 |
 
-| Criterion | 2 | 3 | 4 | 5 | 5b | 6 | 6b | Measured by |
-|---|---|---|---|---|---|---|---|---|
-| Temporal stability (no crawl/flicker) | | | | | | | | `temporal_stability` |
-| Subject identity preserved | | | | | | | | — |
-| Face fidelity | | | | | | | | — |
-| Body / clothing fidelity | | | | | | | | — |
-| Subject vs background sharpness balance | | | | | | | | `sharpness_balance` |
-| Environmental improvement over baseline | | | | | | | | `detail_gain` |
-| Hallucinated detail | | | | | | | | `hf_invention` |
-| Text / signage altered | | | | | | | | `hf_invention` (localised) |
-| Distant-face mutation | | | | | | | | — |
-| Edge halo around the figure | | | | | | | | `edge_halo` |
-| Background drift from the plate | | | | | | | | `bg_drift_vs_plate`, `bg_preserved_exact` |
-| Chunk-boundary consistency | | | | | | | | `temporal_stability` at seams |
-
-### The integration decision
-
-`bg_preserved_exact` is the direct test: the fraction of background pixels that
-survive VACE untouched. Path B is 1.0 by construction. If Path A is close to it
-and has no worse an edge, prefer Path A - one pass, no seam to manage. If Path A
-drifts, prefer Path B and accept the edge, which the narrow centred band keeps to
-about two pixels.
-
-- [ ] Path A `bg_preserved_exact` = ______   Path A `edge_halo` = ______
-- [ ] Path B `edge_halo` = ______
-- [ ] **Retained path: ____________** because ____________
-
-### Specific questions to answer
-
-1. **Does the reference sheet help?** Compare variant 1 against variant 2. If they
-   are indistinguishable, native reference conditioning is not contributing and a
-   subject LoRA becomes worth considering. If variant 2 drifts in identity or
-   clothing while variant 1 holds, the reference is doing real work.
-
-2. **How seed-dependent is it?** Compare variant 1 against variant 3. Large
-   differences mean the conditioning is too weak to pin the result down; consider
-   raising `vace_strength` or improving the reference sheet before anything else.
-
-3. **Is the background genuinely preserved?** Look at the unmasked region in the
-   side-by-side. Some change is expected and unavoidable — the VAE round-trip
-   alone shifts pixels slightly (measured at ~4.6/255 mean absolute in
-   `reports/mask_polarity.json`). Structural change is not expected and means the
-   mask is wrong.
-
-4. **Does the mask cover the whole figure?** Halos or a "floating head" effect
-   mean the mask is too tight. Increase `mask.grow` in the config.
+Path A degrades the whole frame through the VAE round trip to regenerate a few
+percent of one figure. Path B's background is bit-exact and its only cost is a
+three-pixel band.
 
 ---
 
 ## Verdict
 
-- [ ] **Good enough — proceed to a full run** (`scripts/run_full.sh --confirm-full-run`)
-- [ ] **Good enough locally, but do production on the cloud 14B profile**
-- [ ] **Needs tuning first** — record what to change below
-- [ ] **Approach is not working** — record why
+- [x] **Ship the restored plate alone for this shot**
+- [ ] Good enough - proceed to a full run with VACE
+- [ ] Do production on the cloud 14B profile
+- [ ] Approach is not working
 
-### If tuning: what to change
+The aggressive plate is +36.9% detail over the source, scores best on identity,
+invents no garment, and costs 2.5 minutes against 10. Adding VACE at 1.3B makes
+the face softer and less like the references, whatever it is conditioned on.
 
-| Symptom | First thing to try |
-|---|---|
-| Identity drifts from the reference | better/sharper full-body reference; raise `vace_strength` |
-| Background changes where it should not | check the mask review sheets; the mask is probably inverted or too loose |
-| Halo around the figure | raise `mask.feather`, then `mask.grow` |
-| Figure looks stiff or detached from the scene | lower `vace_strength` slightly; verify depth is aligned |
-| Flicker between chunks | raise `video.chunk_overlap` |
-| Too slow | drop `sampling.steps` to 15–20 and re-judge; only then consider an acceleration profile |
+### What is genuinely untested
+
+Only **model capacity**. Everything above is 1.3B VACE and 3B SeedVR2.
+
+1. **SeedVR2 7B** - no training, no identity risk, targets the unresolved fine
+   facial detail, and fits 48 GB (3B peaked at 12.7 GB). Do this first.
+2. **VACE-14B** - now has a correctly built identity pack waiting for it.
+3. **A subject LoRA** - the only route that would genuinely use the reference
+   photographs, since conditioning demonstrably does not.
 
 ---
 
+## Three defects found and fixed during this pilot
+
+1. **The wrong reference builder was used throughout.** `prepare_references.py`
+   (Phase 5) tiles whole photographs - environment, wardrobe, watermarks and
+   all. `make_reference_pack.py` (Phase 5b) is the one implementing the
+   authority split. `run_chunks.py` logs `Reference conditioning: global` or
+   `pack`; that line is the check, and it read `global` for every early run.
+2. **`composite_subject.py` wrote `yuv420p`**, destroying the RGB compositing on
+   the way to disk. `bg_preserved_exact` was 0.034; with `gbrp` it is 1.0000.
+   4:4:4 alone is not enough - 8-bit RGB->YUV is not reversible.
+3. **The composite used the subject mask as alpha.** After a `--protected` run
+   that takes the whole figure from VACE's VAE round trip, costing 8.0% of the
+   garment's detail for nothing. The new `--mask` flag points it at the
+   protected submask instead; garment detail returns to parity (1.850 vs 1.837).
+
 ## Notes
-_free text_
+
+Tracking needed three attempts. The automatic seed locked onto architecture -
+correlation with per-pixel temporal variance r=+0.03, the signature of a static
+structure. A motion-seeded re-track scored r=+0.72. Two defects the user
+identified by eye remain, in one unstable vertical strip; both were localised
+by differencing those frames against the median of the others.
+
+Tracking is deterministic on a given machine (IoU 100.00%, zero disagreeing
+samples) but differs by 0.14% across machines, so a content-hash approval can
+never survive a hardware change.

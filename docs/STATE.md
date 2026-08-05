@@ -14,18 +14,19 @@ interval/duration/resolution of the user's media. Refer to things by role.
 
 ## What this pipeline is
 
-Reference-conditioned generative video restoration. Wan2.1-VACE-1.3B plus
-SeedVR2, driven through a pinned ComfyUI, on a 12 GB RTX 3060.
+Reference-conditioned generative video restoration. Wan2.1-VACE plus SeedVR2,
+through a pinned ComfyUI. Validated locally on 12 GB; run on rented GPUs.
 
 Stage order, and who owns what:
 
 1. **SeedVR2** restores the full frame — the plate. Reduced precision, VAE
-   tiling, temporal batching. Cached by interval + config hash.
-2. **Controls** (depth, pose, masks) come from the **original** footage only,
-   never from the plate.
+   tiling, temporal batching, cached by interval + config hash. **This stage
+   produces essentially all of the measured quality.**
+2. **Controls** (depth, pose, masks) come from the **original** only, never the
+   plate.
 3. **VACE** regenerates the subject over that preserved plate.
-4. **Compositing**: plate, then generated figure, then preserved foreground
-   occluders from the original.
+4. **Compositing**: plate, generated figure, then preserved foreground occluders
+   from the original.
 
 ## Who the target is
 
@@ -35,35 +36,29 @@ Reference photographs can contain more than one person. Identity is resolved by
 - Detect **every** face and person box per image; form consensus across face
   **instances**, not one largest face per image.
 - The dominant identity is the one supported by the most **distinct images**.
-- Tie the target face to the person box containing it — that is what a tracker
-  seeds from.
+- Tie the target face to the person box containing it — a tracker seeds from it.
 - **Reject** an image where two faces cannot be told apart. Never guess.
 - Tracking, pack selection and evaluation share this one bank.
 
 **Never use clothing-sensitive or whole-image embeddings for target identity.**
-A CLIP crop embedding responds to clothing, background and framing, and because
-the face term is down-weighted when the face is small, it *dominated* at low
-resolution — two photographs of another person were enough to carry the
-selection. A candidate with no resolvable face scores **zero** and the shot is
-flagged; when the face cannot be seen is exactly when clothing similarity is
-least able to tell two people apart.
+A CLIP crop embedding responds to clothing and framing and *dominated* at low
+resolution — two photographs of another person carried the selection. No
+resolvable face scores **zero** and flags the shot.
 
 Generation refuses to start unless `subject_status` is settled **and** a human
-has approved the track. Approval is bound to the mask's content hash, so
-re-tracking invalidates it. Run-specific exclusions live in an untracked
-`intermediate/reference_exclusions.txt`.
+has approved the track, bound to the mask's content hash — which also means an
+approval never survives a re-track or a change of machine. Run-specific
+exclusions live in an untracked `intermediate/reference_exclusions.txt`.
 
 ## Authority split — the rule that keeps being violated
 
 External reference photographs show a **different outfit**. They may condition
-**identity only**: face, hair, exposed skin, body appearance. Their clothing and
-accessories are segmented out and replaced with neutral grey before the panel is
-drawn. A faint ghost of the wrong jacket is still a jacket to a generative model.
-
-The garment in the **source interval being restored** is the sole ground truth:
-class, silhouette, boundaries, colour, pattern, accessories, folds, motion. It is
-low resolution and that is fine — preserve its low-frequency colour and structure,
-generate only the missing high-frequency texture.
+**identity only**: face, hair, exposed skin, body appearance. Their clothing is
+segmented out and replaced with neutral grey before the panel is drawn — a faint
+ghost of the wrong jacket is still a jacket. The garment in the **source
+interval** is the sole ground truth: class, silhouette, boundaries, colour,
+pattern, accessories, folds, motion. Low resolution is fine — preserve its
+low-frequency colour and structure, generate only high-frequency texture.
 
 Consequences that are easy to get wrong:
 
@@ -80,15 +75,29 @@ Consequences that are easy to get wrong:
 - The **protected-apparel submask** is what VACE regenerates: confidently
   exposed head regions only, eroded from every garment boundary, required to
   persist across frames. Everything else is black and comes from the plate.
-- Appearance clustering still runs, but no longer confines the choice. Its job
-  was to stop two outfits being combined in one image; with clothing segmented
-  out of every external panel there is no outfit left to conflict, so restricting
-  panels to one cluster would only discard viewing angles.
 - Never describe a good result as a "reference-pack garment fix". Report three
   separate effects: identity improvement from the externals; garment fidelity
   from source-derived conditioning; any effect from chroma correction.
+- **Two builders exist and the wrong one is easy to run.** `prepare_references.py`
+  (Phase 5) tiles whole photographs — background, wardrobe, watermarks. Only
+  `make_reference_pack.py` (5b) applies the split above. `run_chunks.py` prints
+  `Reference conditioning: global` or `pack`; **that line is the check.**
 
 Enforced by `scripts/test_reference_pack.py`.
+
+## What the 1.3B pilot settled — do not re-run these
+
+Numbers in `reports/pilot_results.md`.
+
+- **Reference conditioning is inert at 1.3B.** Removing the sheet moves the face
+  6.6/255; swapping whole-photo for identity-only moves it 1.89. The model reads
+  a reference's *presence*, not its content — better references, generated or
+  otherwise, cannot pay. Only model capacity is untested.
+- **The plate alone beats every VACE variant**, on gradient and on ArcFace
+  identity (all variants under the 0.35 same-face threshold).
+- **The aggressive SeedVR2 profile is the main lever**: +36.9% vs +20.8%, ~45 s.
+- Composite in `gbrp`, never `yuv420p`; after `--protected` pass `--mask` the
+  protected submask, else the garment arrives VAE-degraded.
 
 ## Model facts, read from the installed source
 
@@ -97,36 +106,33 @@ bite most often:
 
 - `length` must be **4n+1**; width/height multiples of **16**.
 - **White = regenerate, black = preserve** (`reactive = control_video * mask`).
-- `reference_image` is indexed `[:1]` — exactly **one** image, hence the
-  composited sheet.
-- VACE **centre-crops** the reference image, so build the sheet at the
-  manifest's dimensions, not the config's.
+- `reference_image` is indexed `[:1]` — exactly **one** image, hence the sheet,
+  and VACE **centre-crops** it, so build it at the manifest's dimensions.
 - Encode control streams into ComfyUI's input dir with `-qp 0`; lossy re-encoding
   rounds mask edges outward.
 - Use `VAEEncodeTiled`. Untiled encode peaks near 12 GB and OOMs.
-- SeedVR2 is **native** to the pinned ComfyUI (`comfy_extras/nodes_seedvr.py`).
-  No custom node pack. `frames_per_chunk` must be 4n+1; `temporal_overlap` is in
+- SeedVR2 is **native** to the pinned ComfyUI (`comfy_extras/nodes_seedvr.py`),
+  no custom node pack. `frames_per_chunk` must be 4n+1; `temporal_overlap` is in
   **latent** frames.
 - Dynamic combos serialise as `<parent>.<child>` under the input name
   (`comfy_api/latest/_io.py::finalize_prefix`).
 
 ## Provenance and staleness
 
-**Two keys, not one.** `vace_key` content-hashes what reaches the sampler:
-staged reference sheet, plate, control, mask, ROI streams, prompts, seed, model
-and sampler settings. `composite_key` hashes what reaches the compositor: VACE
-output, plate, subject mask, occluder mask, band settings. They were one key,
-so widening an alpha ramp — seconds of CPU — marked a finished generation stale
-and demanded ~18 minutes of GPU to reproduce identical pixels.
+**Two keys, not one.** `vace_key` hashes what reaches the sampler (reference
+sheet, plate, control, mask, ROI streams, prompts, seed, model, sampler);
+`composite_key` what reaches the compositor. As one key, widening an alpha ramp
+— seconds of CPU — marked a finished generation stale and demanded ~18 GPU
+minutes to reproduce identical pixels.
 
-Hash file **contents**, never a config or geometry key: a rebuilt plate or a
-re-warped ROI stream keeps its filename and its geometry while its pixels
-change completely. A result whose key no longer matches is **not** a result.
+Hash file **contents**, never a config or geometry key: a rebuilt plate keeps
+its filename and geometry while its pixels change completely. A result whose key
+no longer matches is **not** a result — though a video *container* rehashes even
+when its decoded pixels do not, so a re-run can invalidate an intact approval.
 
-The key is captured **before** staging and re-read **after** inference. If they
-disagree, the inputs changed during the ~16-minute run and the output settles as
-`stale`: the file is kept for inspection but never counted as current. Recording
-the post-run key would mark stale pixels current forever.
+The key is captured **before** staging and re-read **after** inference; if they
+disagree the output settles as `stale`, kept for inspection but never current.
+Recording the post-run key would mark stale pixels current forever.
 
 The manifest carries a per-object revision counter (`_loaded_rev`). A stage that
 loaded an old copy cannot silently overwrite a newer one.
@@ -138,31 +144,27 @@ Run namespacing: `VACE_RUN=<name>` → `runs/<name>/{intermediate,outputs,report
 Past mistakes worth not repeating — each cost a wrong conclusion:
 
 - **Circular measurement.** Never test a set against something derived by
-  subtracting it. Occluders defined as `people & ~dilate(subject)` and then
-  tested against `dilate(subject)` are empty by construction; the "0.0000% OK"
-  was a tautology.
-- **Self-comparison as evidence.** The identity bank is built from the reference
-  photographs, so scoring a photograph against it returns 1.000 for anything
-  already in it. Verify by consensus: collapse near-duplicates, then score by
-  median agreement with the rest. A single maximum lets two copies of the wrong
-  person vouch for each other.
-- **A proxy standing in for the thing itself.** Full-image CLIP distance is not
-  a viewing angle — it responds to background, framing and clothing. Head
-  orientation comes from face landmarks. Proximity is not occlusion — a person
-  beside the subject occludes nothing; verify depth order. A rise in
-  high-frequency energy is not restored texture — ringing and noise raise it
-  too. Name the measurement after what it measures.
+  subtracting it. Occluders defined as `people & ~dilate(subject)` then tested
+  against `dilate(subject)` are empty by construction; "0.0000% OK" was a
+  tautology.
+- **Self-comparison as evidence.** The bank is built from the reference photos,
+  so scoring one against it returns 1.000. Verify by consensus: collapse
+  near-duplicates, score by median agreement with the rest. A single maximum
+  lets two copies of the wrong person vouch for each other.
+- **A proxy standing in for the thing itself.** CLIP distance is not a viewing
+  angle (use face landmarks); proximity is not occlusion (verify depth order);
+  a rise in high-frequency energy is not restored texture — ringing and noise
+  raise it too. Name the measurement after what it measures.
 - **A detector's training bias read as absence.** Grounding DINO is trained on
-  upright people. A reclining subject scores below the 0.30 threshold while an
-  upright bystander scores above it — measured here at ≤0.27 vs 0.33–0.36 — so
-  the only candidate offered was the wrong person. "Found somebody" is not
-  "found the subject": retry at a lower threshold whenever no candidate has
-  identity evidence, not only when nothing at all was found. Never size or score
-  a subject by height alone; an unusual pose makes height the wrong axis.
+  upright people; a reclining subject scored ≤0.27 against an upright
+  bystander's 0.33–0.36, so the only candidate offered was the wrong person.
+  "Found somebody" is not "found the subject": retry lower whenever no candidate
+  has identity evidence. Never score a subject by height; pose makes it wrong.
 - **Container noise read as signal.** An exact-equality metric measured encoder
   noise and inverted the ranking. Use a tolerance.
-- **Piping a build through `head`/`tail`.** SIGPIPE kills a generator mid-write;
-  `tail` masks a non-zero exit.
+- **A static mask is architecture, not a subject.** A bbox that barely moves has
+  locked onto scenery. Correlate mask occupancy with per-pixel temporal variance:
+  the doorway track scored r=+0.03 against motion, a correct one +0.58.
 
 ## Standing instructions from the user
 
@@ -172,15 +174,16 @@ Past mistakes worth not repeating — each cost a wrong conclusion:
 - Prepare the 14B cloud path, but **do not download 14B locally**.
 - State separate effects, separate runtimes, separate VRAM and disk figures.
   Never a single blended claim.
+- The macOS laptop has no CUDA and the lockfile is CUDA-only, so there is **no
+  local pipeline there**. From that host, all GPU work runs on the rented box.
+- **Take the GPU pod down whenever it is not actively needed**, including while
+  the user reviews, without asking. `runpodctl stop pod` if it will be used
+  again; `remove pod` when done. Either way the volume persists.
 
 ## Cloud
 
-See `docs/CLOUD_RUNBOOK.md`. Connection quirks, the transfer allowlist, the gates
-that must pass before a generation, and teardown.
-
-The number that decides whether VACE runs at all: the **protected-regenerable
-fraction**. At 240p it is 1.57% of the tracked figure — the plate supplies the
-rest. It is resolution-dependent; re-measure at 720p.
+`docs/CLOUD_RUNBOOK.md`: connection quirks, transfer allowlist, gates, teardown.
+Protected-regenerable fraction: 1.57% at 240p, 4.42% at 720p — small either way.
 
 ## Open work
 
@@ -189,11 +192,9 @@ Tracked in the task list; kept here only as orientation.
 - `mask.grow=4` puts 4.51% of the dilated subject mask onto another person.
   Reduce it or rely on the occluder layer.
 - Read garment metrics in order: class and coverage, boundaries, accessories,
-  then colour — and only if `colour_is_meaningful`. Once the silhouette has
-  moved, chroma correction just matches a missing garment to the palette of the
-  one that replaced it.
+  then colour — and only if `colour_is_meaningful`. Chroma correction on a moved
+  silhouette just matches a missing garment to the palette of its replacement.
 - If the source face is covered, reference identity agreement is **unobservable**,
   not a score to maximise. `covering_removed` is the metric that matters.
-- Whole-body pose control: generate a pose-controlled variant and compare it
-  against the depth-controlled one under identical references, background,
-  prompt and seed.
+- Untested, in order: SeedVR2 **7B**, VACE-14B, a subject LoRA. Pose-vs-depth
+  control matters only if VACE earns its place at a larger size.
