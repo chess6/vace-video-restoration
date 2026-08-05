@@ -497,6 +497,29 @@ def main() -> int:
                 return 1
         log.info("Protected submask present for all %d chunk(s)", len(chunks))
 
+    # Whether the graph HAS a LoRA node is fixed when it is built, so a config
+    # that turns one on or off since the last build cannot be reconciled at run
+    # time. Check it here, in the pre-flight, so --dry-run catches it: finding
+    # this out by starting a real generation costs ~18 GPU minutes and produces
+    # a result whose recorded LoRA never touched the pixels.
+    _lora_cfg = ((cfg["model"].get("lora") or {}).get("name") or "")
+    _wf_has_lora = any(n.get("class_type") == "LoraLoaderModelOnly"
+                       for n in load_api_workflow(wf_path).values())
+    if bool(_lora_cfg) != _wf_has_lora:
+        log.error("Config %s LoRA but %s %s one. Rebuild first: "
+                  "scripts/build_workflows.py --config %s",
+                  "names a" if _lora_cfg else "names no",
+                  wf_path.name, "has" if _wf_has_lora else "has no",
+                  cfg.get("_config_path"))
+        return 1
+    if _lora_cfg:
+        _lp = P.comfy / "models" / "loras" / _lora_cfg
+        if not _lp.exists():
+            log.error("LoRA %s is not in %s", _lora_cfg, _lp.parent)
+            return 1
+        log.info("Subject LoRA: %s @ %.2f", _lora_cfg,
+                 float((cfg["model"].get("lora") or {}).get("strength", 1.0)))
+
     if args.dry_run:
         log.info("=" * 62)
         log.info("DRY RUN. All checks passed and %d chunk(s) WOULD be generated:",
@@ -635,6 +658,31 @@ def main() -> int:
             _m = cfg["model"]
             set_input(wf, "UNETLoader", "unet_name", _m["diffusion_model"])
             set_input(wf, "UNETLoader", "weight_dtype", _m["weight_dtype"])
+            # The subject LoRA has the same problem and one difference: whether
+            # a LoraLoaderModelOnly node exists at all is decided at BUILD time,
+            # so a config that turns one on cannot be patched in - the node is
+            # not there to patch. vace_key hashes cfg["model"] entire, LoRA
+            # included, so without this check a run would record a LoRA it never
+            # applied, and the result would look reproducible forever.
+            _lora = (_m.get("lora") or {}).get("name") or ""
+            _has_node = any(n.get("class_type") == "LoraLoaderModelOnly"
+                            for n in wf.values())
+            if _lora and not _has_node:
+                log.error("Config asks for LoRA %s but %s has no LoRA node. "
+                          "Rebuild: scripts/build_workflows.py --config %s",
+                          _lora, wf_path.name, cfg.get("_config_path"))
+                return 1
+            if _has_node and not _lora:
+                log.error("%s carries a LoRA node but the config names none. "
+                          "Rebuild before running, or the generation is "
+                          "conditioned by a LoRA nothing recorded.", wf_path.name)
+                return 1
+            if _lora:
+                set_input(wf, "LoraLoaderModelOnly", "lora_name", _lora)
+                set_input(wf, "LoraLoaderModelOnly", "strength_model",
+                          float((_m.get("lora") or {}).get("strength", 1.0)))
+                log.info("Subject LoRA: %s @ %.2f", _lora,
+                         float((_m.get("lora") or {}).get("strength", 1.0)))
             set_input(wf, "LoadVideo", "file", src_name, title_contains="source")
             set_input(wf, "LoadVideo", "file", dep_name, title_contains="depth")
             if use_mask:

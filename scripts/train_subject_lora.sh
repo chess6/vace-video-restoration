@@ -33,10 +33,11 @@ ROOT="$(pwd)"
 
 MUSUBI_DIR="${MUSUBI_DIR:-/workspace/musubi-tuner}"
 WAN_TRAIN_MODELS="${WAN_TRAIN_MODELS:-/workspace/wan_train_models}"
-# bf16, not the fp16 twin sitting beside it: the trainer asserts that the DiT's
-# dtype and --mixed_precision agree, so an fp16 checkpoint forces fp16 training,
-# and fp16 is the less stable of the two for a small-sample LoRA. The inference
-# checkpoint stays fp16 - LoRA weights are cast at load and need not match it.
+# bf16, not the fp16 twin in the same directory: the trainer asserts that the
+# DiT's dtype and --mixed_precision agree, so an fp16 checkpoint forces fp16
+# training, and fp16 is the less stable of the two for a small-sample LoRA. The
+# inference checkpoint stays fp16 - LoRA weights are cast at load and need not
+# match it.
 DIT="${DIT:-$WAN_TRAIN_MODELS/split_files/diffusion_models/wan2.1_t2v_1.3B_bf16.safetensors}"
 T5="${T5:-$WAN_TRAIN_MODELS/models_t5_umt5-xxl-enc-bf16.pth}"
 VAE="${VAE:-$ROOT/ComfyUI/models/vae/wan_2.1_vae.safetensors}"
