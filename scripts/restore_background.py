@@ -74,7 +74,8 @@ def cache_dir(profile: str, phash: str) -> Path:
 
 def restore_interval(client: ComfyClient, wf_path: Path, work: Path, start: int,
                      end: int, fps: int, width: int, height: int, dst: Path,
-                     short_edge: int, timeout: float, log) -> dict:
+                     short_edge: int, timeout: float, log,
+                     model: str | None = None, weight_dtype: str | None = None) -> dict:
     """Restore [start, end) of the working stream into `dst`. Returns run stats."""
     src = P.comfy_input / "bg_source.mp4"
     slice_frames(work, src, start, end, fps, log, lossless=False)
@@ -84,6 +85,16 @@ def restore_interval(client: ComfyClient, wf_path: Path, work: Path, start: int,
 
     wf = load_api_workflow(wf_path)
     set_input(wf, "LoadVideo", "file", src.name)
+    # Re-assert the checkpoint at RUN time. build_workflows.py bakes the config's
+    # model into UNETLoader at BUILD time, so the graph on disk goes stale the
+    # moment the config changes or --model is passed - and nothing noticed,
+    # because the model name reaches the cache hash and the recorded metadata by
+    # a different route. That combination is the dangerous one: a run would be
+    # filed as 7B, force a cache rebuild, and execute 3B.
+    if model:
+        set_input(wf, "UNETLoader", "unet_name", model)
+    if weight_dtype:
+        set_input(wf, "UNETLoader", "weight_dtype", weight_dtype)
     # The workflow is built from the config, but --auto-aspect may have chosen a
     # different working geometry. Patch both resize nodes so the plate comes back
     # pixel-aligned with the depth, the mask and the original.
@@ -216,7 +227,8 @@ def main() -> int:
             log.info("[%d/%d] %d-%d restoring (%d frames)...",
                      i + 1, len(intervals), a, z, z - a)
             s = restore_interval(client, wf_path, work, a, z, fps, width, height,
-                                 dst, int(b["target_short_edge"]), args.timeout, log)
+                                 dst, int(b["target_short_edge"]), args.timeout, log,
+                                 model=b["model"], weight_dtype=b["weight_dtype"])
             s.update(profile=profile, start=a, end=z)
             stats.append(s)
             built += 1

@@ -602,6 +602,13 @@ def main() -> int:
 
             # ---- patch the workflow -------------------------------------------
             wf = load_api_workflow(wf_path)
+            # Re-assert the checkpoint at RUN time, for the same reason as in
+            # restore_background.py: build_workflows.py bakes it in at BUILD
+            # time, so a config change without a rebuild would run the previous
+            # model while vace_key and the manifest both record the new one.
+            _m = cfg["model"]
+            set_input(wf, "UNETLoader", "unet_name", _m["diffusion_model"])
+            set_input(wf, "UNETLoader", "weight_dtype", _m["weight_dtype"])
             set_input(wf, "LoadVideo", "file", src_name, title_contains="source")
             set_input(wf, "LoadVideo", "file", dep_name, title_contains="depth")
             if use_mask:
