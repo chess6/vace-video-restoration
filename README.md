@@ -193,6 +193,7 @@ scripts/run_full.sh --confirm-full-run   # actually starts
 | Measure the variants | `venv/bin/python scripts/evaluate_pilot.py` |
 | **Zip everything needing review** | `venv/bin/python scripts/make_review_bundle.py` |
 | Track the subject | `venv/bin/python scripts/track_subject.py` |
+| Review sheet with coordinates burned in | `venv/bin/python scripts/make_labeled_sheet.py <video> <mask|none> <out.png> [tiles]` |
 | Re-seed one shot | `venv/bin/python scripts/track_subject.py --shot shot0003 --init-box x0,y0,x1,y1 --force` |
 | Prove mask polarity | `venv/bin/python scripts/verify_mask_polarity.py` |
 | Rebuild workflows | `venv/bin/python scripts/build_workflows.py` |
