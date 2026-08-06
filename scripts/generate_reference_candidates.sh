@@ -66,7 +66,17 @@ nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1 || {
 [ -f "$LORA" ] || { echo "FATAL: no LoRA at $LORA" >&2; exit 1; }
 [ -f "$DIT" ] || { echo "FATAL: no de-prefixed DiT at $DIT (see prepare_musubi_dit.py)" >&2; exit 1; }
 
-TRIGGER="$(cat "$(find "$DATASET/train" -name '*.txt' | sort | head -1)")"
+# The trigger comes from dataset.json, which records it, rather than from a
+# caption file beside the crops: the crops are large and regenerable, the split
+# is not, and a machine that has been given only dataset.json still knows every
+# token and filename the run needs.
+TRIGGER="$(./venv/bin/python -c "
+import json,sys
+d=json.load(open('$DATASET/dataset.json'))
+t=d.get('trigger')
+sys.exit('dataset.json records no trigger') if not t else print(t)
+")"
+[ -n "$TRIGGER" ] || { echo "FATAL: no trigger token in $DATASET/dataset.json" >&2; exit 1; }
 say "trigger '$TRIGGER' | seeds: $SEEDS | ${W}x${H} | $STEPS steps"
 
 # The grid is pose first, lighting second: pose is what a RefSR matcher aligns
