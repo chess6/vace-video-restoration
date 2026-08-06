@@ -45,6 +45,16 @@ VID_EXT = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
 THRESHOLD = 0.35
 
 
+def _eye_px(kps) -> float:
+    """Inter-ocular distance: how much real detail per facial feature this image
+    carries. Identity says whether it is the right person; this says whether it
+    is worth anything as a reference, because a reference can only donate detail
+    it actually has."""
+    if kps is None or len(kps) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.asarray(kps[0]) - np.asarray(kps[1])))
+
+
 def probe_media(path: Path, models, n_frames: int,
                 mask_path: Path | None = None) -> list[np.ndarray]:
     """Face embeddings found in one image or video.
@@ -59,8 +69,8 @@ def probe_media(path: Path, models, n_frames: int,
 
     if path.suffix.lower() in IMG_EXT:
         im = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
-        emb, _, _ = face_detail(models, im)
-        return [emb] if emb is not None else []
+        emb, kps, _ = face_detail(models, im)
+        return [(emb, _eye_px(kps))] if emb is not None else []
 
     import cv2
     cap = cv2.VideoCapture(str(path))
@@ -99,9 +109,9 @@ def probe_media(path: Path, models, n_frames: int,
             ys, xs = np.where(masks[i])
             frame = frame[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        emb, _, _ = face_detail(models, Image.fromarray(rgb))
+        emb, kps, _ = face_detail(models, Image.fromarray(rgb))
         if emb is not None:
-            out.append(emb)
+            out.append((emb, _eye_px(kps)))
     return out
 
 
@@ -187,6 +197,7 @@ def main() -> int:
     # Ceiling: real photographs of the same person, disjoint from the bank.
     ceiling = stats([float(np.max(hold_bank @ per[n]["instance"]["face"]))
                      for n in train_names if n in per])
+    eyes = []  # reset per group below
 
     groups = {}
     for path in args.media:
@@ -197,15 +208,17 @@ def main() -> int:
         if not files:
             log.warning("%s holds no image or video; skipped", path)
             continue
-        sims, sims_train, n_probed = [], [], 0
+        sims, sims_train, eyes, n_probed = [], [], [], 0
         for f in files:
-            for emb in probe_media(f, models, args.frames, args.mask):
+            for emb, eye in probe_media(f, models, args.frames, args.mask):
                 n_probed += 1
                 sims.append(float(np.max(hold_bank @ emb)))
+                eyes.append(eye)
                 if train_bank is not None:
                     sims_train.append(float(np.max(train_bank @ emb)))
         groups[path.name] = {"items": len(files),
                              "measured": stats(sims),
+                             "eye_px_median": round(float(np.median(eyes)), 1) if eyes else None,
                              "invalid_train_bank": stats(sims_train)}
         if not n_probed:
             log.warning("%-28s no face detected in any item - a LoRA that "
@@ -214,16 +227,16 @@ def main() -> int:
 
     w = max([len(k) for k in groups] + [12])
     log.info("=" * (w + 46))
-    log.info("%-*s %6s %8s %8s %8s   %s", w, "group", "faces", "median",
-             "best", "worst", "vs train bank (INVALID)")
-    log.info("%-*s %6d %8s %8s %8s   %s", w, "CEILING (real photos)",
+    log.info("%-*s %6s %8s %8s %8s %8s   %s", w, "group", "faces", "median",
+             "best", "worst", "eye px", "vs train bank (INVALID)")
+    log.info("%-*s %6d %8s %8s %8s %8s   %s", w, "CEILING (real photos)",
              ceiling.get("faces", 0), ceiling.get("median", "-"),
-             ceiling.get("best", "-"), ceiling.get("worst", "-"), "-")
+             ceiling.get("best", "-"), ceiling.get("worst", "-"), "-", "-")
     for name, g in groups.items():
         m, iv = g["measured"], g["invalid_train_bank"]
-        log.info("%-*s %6d %8s %8s %8s   %s", w, name, m.get("faces", 0),
+        log.info("%-*s %6d %8s %8s %8s %8s   %s", w, name, m.get("faces", 0),
                  m.get("median", "-"), m.get("best", "-"), m.get("worst", "-"),
-                 iv.get("median", "-"))
+                 g.get("eye_px_median", "-"), iv.get("median", "-"))
     log.info("=" * (w + 46))
     log.info("Threshold for a plausible match: %.2f. The 1.3B pilot measured "
              "0.17-0.21 with no LoRA.", THRESHOLD)
