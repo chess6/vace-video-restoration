@@ -40,7 +40,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import P, load_config, setup_logging  # noqa: E402
+from common import P, load_config, lora_stack, setup_logging  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -227,16 +227,29 @@ def common_models(g: Graph, cfg: dict) -> dict:
     m = cfg["model"]
     unet = g.add(N("UNETLoader", "VACE 1.3B",
                    unet_name=m["diffusion_model"], weight_dtype=m["weight_dtype"]))
-    # Optional subject LoRA, applied to the diffusion model only - there is no
+    # Optional LoRA stack, applied to the diffusion model only - there is no
     # text-encoder side to patch here, since conditioning comes from UMT5 via a
     # separate CLIPLoader. A LoRA is welded to one base checkpoint: loading one
     # trained against a different model is not an error ComfyUI will catch, so
     # the pin lives beside the checkpoint in the config rather than on a flag.
-    lora = m.get("lora") or {}
-    if lora.get("name"):
-        unet = g.add(N("LoraLoaderModelOnly", "Subject LoRA",
-                       model=unet(), lora_name=lora["name"],
-                       strength_model=float(lora.get("strength", 1.0))))
+    #
+    # More than one chains, each node taking the previous node's model, which is
+    # how ComfyUI itself stacks them. The COUNT is fixed here, at build time, and
+    # cannot be patched at run time - run_chunks.py compares it against the
+    # config before it spends a GPU minute.
+    #
+    # An overlay-supplied LoRA is wired in with an EMPTY name: workflows/*.json
+    # is tracked, so baking a third-party filename into it would publish through
+    # the graph exactly what the overlay exists to withhold (rule 2a). The node
+    # is there, the name arrives at run time from run_chunks.py, which re-asserts
+    # every LoRA name and strength anyway.
+    stack = lora_stack(cfg)
+    for i, ent in enumerate(stack):
+        local = ent["source"] == "overlay"
+        unet = g.add(N("LoraLoaderModelOnly",
+                       f"LoRA {i + 1}/{len(stack)}" + (" (local)" if local else ""),
+                       model=unet(), lora_name="" if local else ent["name"],
+                       strength_model=float(ent["strength"])))
     clip = g.add(N("CLIPLoader", "UMT5-XXL FP8",
                    clip_name=m["text_encoder"], type=m["clip_type"], device="default"))
     vae = g.add(N("VAELoader", "Wan 2.1 VAE", vae_name=m["vae"]))
@@ -305,7 +318,7 @@ def graph_main(cfg: dict, masked: bool = True, reference: bool = True,
     # OUTSIDE the mask is what survives into the output untouched. Pointing that
     # at the SeedVR2 restoration is the whole background integration: the model
     # sees a restored environment as the thing it must keep, and regenerates only
-    # the masked figure. The depth, the mask and the chunk timing still come from
+    # the masked subject. The depth, the mask and the chunk timing still come from
     # the original stream, so nothing structural depends on the restoration.
     if background:
         bg_v = g.add(N("LoadVideo", "SeedVR2-restored background chunk",
@@ -328,8 +341,8 @@ def graph_main(cfg: dict, masked: bool = True, reference: bool = True,
         # revision (comfy_extras/nodes_mask.py): it multiplies the leftmost N
         # COLUMNS and topmost N ROWS of the canvas by a ramp -
         #     for x in range(left): output[:, :, x] *= (x + 1.0) / left
-        # It feathers the frame border, not the subject's contour. For a figure
-        # in the middle of frame it does nothing at all, and where the figure
+        # It feathers the frame border, not the subject's contour. For a subject
+        # in the middle of frame it does nothing at all, and where the subject
         # touches a border it erodes the mask there, making VACE preserve
         # exactly where it was asked to regenerate. mask.feather never softened
         # a silhouette in this pipeline.
@@ -488,12 +501,12 @@ def seedvr2_target_size(w: int, h: int, short_edge: int) -> tuple[int, int]:
 
 
 def graph_pose(cfg: dict) -> Graph:
-    """Whole-body pose control: body, hands and face landmarks.
+    """Whole-extent pose control: extent, extremities and anchor keypoints.
 
     Depth carries volume and occlusion but renders articulation poorly at this
-    source resolution - fingers and limb crossings blur into one another, which
+    source resolution - fine extremities and self-crossings blur together, which
     is what makes contact and interaction wrong. SDPose gives explicit joints,
-    including hands and face, which is the missing signal.
+    including the extremities and the anchor, which is the missing signal.
 
     This is an ALTERNATIVE control profile, not something to blend with depth.
     VACE is trained on individual control representations; averaging two of them
@@ -505,12 +518,12 @@ def graph_pose(cfg: dict) -> Graph:
     v = cfg["video"]
     c = cfg.get("pose", {})
     g = Graph("sdpose_wholebody",
-              "SDPose whole-body (body + hands + face) control video for VACE")
-    ck = g.add(N("CheckpointLoaderSimple", "SDPose whole-body",
+              "SDPose whole-extent (extent + hands + anchor) control video for VACE")
+    ck = g.add(N("CheckpointLoaderSimple", "SDPose whole-extent",
                  ckpt_name=c.get("model", "sdpose_wholebody_fp16.safetensors")))
     src_v = g.add(N("LoadVideo", "Source chunk", file="pose_source.mp4"))
     src = g.add(N("GetVideoComponents", "Source frames", video=src_v()))
-    kp = g.add(N("SDPoseKeypointExtractor", "Extract whole-body keypoints",
+    kp = g.add(N("SDPoseKeypointExtractor", "Extract whole-extent keypoints",
                  model=ck(0), vae=ck(2), image=src(),
                  batch_size=int(c.get("batch_size", 8))))
     draw = g.add(N("SDPoseDrawKeypoints", "Render skeleton",
@@ -521,7 +534,7 @@ def graph_pose(cfg: dict) -> Graph:
                    draw_feet=bool(c.get("draw_feet", True)),
                    draw_head=bool(c.get("draw_head", True)),
                    stick_width=int(c.get("stick_width", 4)),
-                   face_point_size=int(c.get("face_point_size", 3)),
+                   anchor_point_size=int(c.get("anchor_point_size", 3)),
                    score_threshold=float(c.get("score_threshold", 0.3))))
     vid = g.add(N("CreateVideo", "Assemble frames", images=draw(),
                   fps=float(v["model_fps"])))

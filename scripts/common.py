@@ -152,11 +152,64 @@ def file_digest(path: Path | None) -> str | None:
     return h.hexdigest()[:16]
 
 
+def cached_file_digest(path: Path) -> str | None:
+    """file_digest, remembered against (size, mtime).
+
+    For a checkpoint this is the difference between a provenance check and a
+    reason not to have one: a 17 GB fp8 UNet is a minute of I/O to hash, which is
+    nothing once per run and absurd once per chunk. The cache is keyed by size and
+    mtime_ns as well as path, so a file replaced in place still re-hashes.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+    st = path.stat()
+    key = f"{path.resolve()}|{st.st_size}|{st.st_mtime_ns}"
+    store = P.intermediate / "digest_cache.json"
+    cache = {}
+    if store.exists():
+        try:
+            cache = json.loads(store.read_text())
+        except (OSError, json.JSONDecodeError):
+            cache = {}
+    if key in cache:
+        return cache[key]
+    digest = file_digest(path)
+    cache[key] = digest
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n")
+    return digest
+
+
+def safetensors_index(path: Path) -> dict[str, dict]:
+    """{tensor name: {"dtype", "shape", "data_offsets"}} from the header alone.
+
+    A safetensors file is <u64 header length><header JSON><tensor data>, so every
+    tensor NAME, dtype and shape is readable from the first few hundred KB
+    without loading a 34 GB checkpoint, without torch, and without the venv.
+
+    That is what makes a checkpoint swap checkable before it costs GPU time:
+    whether a candidate UNet is a drop-in is a question about its key set and
+    tensor shapes, and those are right here in the header.
+    """
+    path = Path(path)
+    with open(path, "rb") as f:
+        n = int.from_bytes(f.read(8), "little")
+        if not 0 < n < (1 << 28):
+            raise ValueError(f"{path.name}: not a safetensors file")
+        head = f.read(n)
+    if len(head) != n:
+        raise ValueError(f"{path.name}: truncated safetensors header")
+    index = json.loads(head)
+    index.pop("__metadata__", None)
+    return index
+
+
 def generation_key(parts: dict) -> str:
     """One key covering EVERYTHING that determines a generated chunk.
 
     Reference pack, subject mask, occluder mask, structural control (depth or
-    pose), ROI transform, prompt, seed, model settings, garment settings and the
+    pose), ROI transform, prompt, seed, model settings, attribute settings and the
     background plate. Content-hashed where the input is a file, so editing a mask
     or rebuilding a pack changes the key even though the path did not.
 
@@ -308,8 +361,190 @@ def load_config(path: str | Path | None = None) -> dict:
     cfg["_config_path"] = str(path)
     if len(seen) > 1:
         cfg["_config_chain"] = [str(p) for p in seen]
+    _apply_prompt_overlay(cfg, yaml)
     validate_config(cfg)
     return cfg
+
+
+PROMPT_OVERLAY = "prompt.local.yaml"
+
+
+def _apply_prompt_overlay(cfg: dict, yaml) -> None:
+    """Overlay the untracked conditioning text, and resolve the trigger token.
+
+    Conditioning text is a functional input - reword it and the model produces
+    something else - which is why rule 2a used to exempt it. The exemption was
+    wrong. A prompt works by describing the subject precisely, and a description
+    precise enough to steer a generator is precise enough to say what was
+    generated; leaving it in a tracked file publishes the one thing the rest of
+    this repo is careful never to state.
+
+    So the wording lives in an untracked overlay and the tracked configs carry a
+    default that is category-free and still runs. Structure stays reviewable in
+    the open: which profile prompts, which arm carries the trigger, how the two
+    compose. Only the wording is withheld, and reproducing a recorded number
+    needs the overlay that produced it.
+
+    `prompt.use_trigger` is tracked because WHICH arm carries the token is the
+    experiment's design; the token itself is a name and lives in the overlay.
+    A missing token is not defaulted around: a LoRA run whose trigger went
+    missing looks exactly like a LoRA that did not work, and that has already
+    cost a session (docs/STATE.md).
+    """
+    prompt = cfg.setdefault("prompt", {})
+    overlay = P.configs / PROMPT_OVERLAY
+    local = {}
+    if overlay.exists():
+        with open(overlay) as f:
+            local = yaml.safe_load(f) or {}
+        for k in ("positive", "negative"):
+            if local.get(k):
+                prompt[k] = local[k]
+
+    if prompt.pop("use_trigger", False):
+        trigger = str(local.get("trigger") or "").strip()
+        if not trigger:
+            raise ValueError(
+                f"{cfg.get('profile') or cfg.get('_config_path')} sets prompt.use_trigger, but "
+                f"configs/{PROMPT_OVERLAY} supplies no `trigger:`. The captions in the "
+                "training set were that token and nothing else, so the LoRA would load "
+                "and do approximately nothing, which is indistinguishable from a LoRA "
+                "that did not work. Refusing to run rather than record that as a result."
+            )
+        prompt["positive"] = f"{trigger}, {prompt['positive'].strip()}"
+
+
+def prompt_overlay(key: str) -> str:
+    """One entry from the untracked conditioning-text overlay, or a hard failure.
+
+    The open-vocabulary detector's class prompt lives there for the same reason
+    the profile prompts do: it works by naming what the subject IS, so any
+    wording good enough to detect the subject states the one thing rule 2a exists
+    to keep out of a tracked file. What stays in the open is everything about how
+    detection is used - the thresholds, the retry, the fusion, the refusal to
+    guess - which is where the behaviour that matters actually lives.
+
+    No default. A silently generic detection prompt is worse than none: Grounding
+    DINO's training prior already under-scores a subject that does not match its
+    typical framing, and this project has been handed the wrong candidate exactly
+    that way (docs/STATE.md). Missing wording must stop the run, not quietly
+    change which candidate is offered.
+    """
+    import yaml
+    overlay = P.configs / PROMPT_OVERLAY
+    if not overlay.exists():
+        raise FileNotFoundError(
+            f"configs/{PROMPT_OVERLAY} is missing; it holds `{key}`. It is untracked "
+            "by design (rule 2a) - copy it from the run's state bundle, or write it. "
+            f"scripts/common.py::prompt_overlay explains why {key} is not defaulted.")
+    with open(overlay) as f:
+        val = str(((yaml.safe_load(f) or {}).get(key) or "")).strip()
+    if not val:
+        raise ValueError(f"configs/{PROMPT_OVERLAY} records no `{key}:`")
+    return val
+
+
+# ---------------------------------------------------------------------------
+# LoRA stack
+# ---------------------------------------------------------------------------
+# `model.lora` used to be one mapping, which meant the pipeline had exactly one
+# LoRA slot and using it for anything cost it the subject LoRA. That is the wrong
+# shape for what a LoRA is actually for here: the subject LoRA supplies match,
+# and a behaviour LoRA - one that changes what the base model is willing or able
+# to render - supplies something orthogonal to it. Wanting both is the normal
+# case, not an exotic one, and with one slot "just swap the LoRA" silently drops
+# the arm that carries match.
+#
+# So the field takes a LIST as well, and every consumer goes through
+# lora_stack() rather than reading the field. Both spellings still parse:
+#
+#   lora: {name: a.safetensors, strength: 1.0}          # historical, still valid
+#   lora: [{name: a.safetensors, strength: 1.0},        # a stack, applied in
+#          {name: b.safetensors, strength: 0.6}]        # this order
+#
+# The LoRAs chain as separate LoraLoaderModelOnly nodes on the model path, which
+# is what ComfyUI's own LoraLoader does when a user stacks two of them, and each
+# is verified to BIND separately (scripts/verify_lora_loads.py): two LoRAs that
+# both claim the same base are still two independent key-name gambles, and a
+# stack where one half no-ops looks exactly like a stack that worked.
+
+LORA_OVERLAY_KEY = "loras"
+
+
+def _lora_entries(raw, source: str) -> list[dict]:
+    """Normalise one `lora:` field into a list of {name, strength, source}."""
+    if not raw:
+        return []
+    if isinstance(raw, (dict, str)):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raise ValueError(f"`lora` must be a mapping or a list of mappings, "
+                         f"not {type(raw).__name__}")
+    out = []
+    for e in raw:
+        if isinstance(e, str):
+            e = {"name": e}
+        if not isinstance(e, dict):
+            raise ValueError(f"`lora` entry must be a mapping, not {type(e).__name__}")
+        name = str(e.get("name") or "").strip()
+        if not name:
+            # `name: ""` is how every profile spells "no LoRA", and the control
+            # arm of the LoRA experiment is exactly that override. Dropping the
+            # entry rather than erroring keeps that spelling working.
+            continue
+        if "/" in name or "\\" in name or name.startswith("."):
+            raise ValueError(
+                f"LoRA `{name}` must be a bare filename inside ComfyUI/models/loras. "
+                "A path here escapes the one directory the binding check and the "
+                "provenance digest both look in.")
+        try:
+            strength = float(e.get("strength", 1.0))
+        except (TypeError, ValueError):
+            raise ValueError(f"LoRA `{name}`: strength must be a number, "
+                             f"got {e.get('strength')!r}") from None
+        out.append({"name": name, "strength": strength, "source": source})
+    return out
+
+
+def lora_stack(cfg: dict) -> list[dict]:
+    """Every LoRA this config applies, in the order they are chained.
+
+    Config entries first, then any supplied by the untracked overlay, because a
+    tracked config must be able to say "the subject LoRA plus whatever local
+    behaviour LoRA this machine has" without naming the second one.
+
+    That last part is rule 2a, not fastidiousness. A third-party LoRA is named by
+    its author, and authors name them after what they make the model produce - so
+    the filename asserts a category about what is being generated of this
+    subject, in a tracked file, which is the exact leak the prompt overlay was
+    created to close. The overlay (configs/prompt.local.yaml, key `loras`) takes
+    the same {name, strength} entries and is carried between machines by
+    scripts/state_bundle.sh with the rest of the untracked half.
+
+    Loading the same file twice is rejected rather than deduplicated: it is
+    always either a copy-paste slip or an attempt to double a strength, and the
+    second one has a field for it.
+    """
+    stack = _lora_entries((cfg.get("model") or {}).get("lora"), "config")
+    overlay = P.configs / PROMPT_OVERLAY
+    if overlay.exists():
+        # Imported only when there is an overlay to parse, for the reason
+        # _apply_prompt_overlay gives: a machine without the venv must still be
+        # able to reason about a config, and a top-level PyYAML import took that
+        # away once already.
+        import yaml
+        with open(overlay) as f:
+            stack += _lora_entries((yaml.safe_load(f) or {}).get(LORA_OVERLAY_KEY),
+                                   "overlay")
+    seen = set()
+    for e in stack:
+        if e["name"] in seen:
+            raise ValueError(
+                f"LoRA `{e['name']}` appears twice in the stack. Loading a file "
+                "twice does not error, it applies the patch twice - use one entry "
+                "with the strength you want.")
+        seen.add(e["name"])
+    return stack
 
 
 def validate_config(cfg: dict) -> None:
@@ -317,6 +552,7 @@ def validate_config(cfg: dict) -> None:
 
     These constraints come from ComfyUI/comfy_extras/nodes_wan.py::WanVaceToVideo.
     """
+    lora_stack(cfg)  # raises on a malformed stack, at load time
     v = cfg["video"]
     n = v["chunk_frames"]
     if (n - 1) % 4 != 0:

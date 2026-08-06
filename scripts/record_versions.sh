@@ -64,15 +64,47 @@ done
 echo
 echo "Full checksums are re-verified on every run of \`scripts/download_models.sh\`."
 echo
-echo "## Auxiliary models (Hugging Face, cached in \`hf_cache/\`)"
+echo "## Auxiliary models (Hugging Anchor, cached in \`hf_cache/\`)"
 echo
 echo "| Model | Purpose |"
 echo "|---|---|"
-echo "| \`facebook/sam2.1-hiera-large\` | full-figure mask tracking |"
-echo "| \`IDEA-Research/grounding-dino-base\` | open-vocabulary person detection |"
-echo "| \`openai/clip-vit-large-patch14\` | appearance / clothing ReID embedding |"
+echo "| \`facebook/sam2.1-hiera-large\` | full-subject mask tracking |"
+echo "| \`IDEA-Research/grounding-dino-base\` | open-vocabulary candidate detection |"
+echo "| \`openai/clip-vit-large-patch14\` | appearance / attributes ReID embedding |"
 echo "| \`depth-anything/Depth-Anything-V2-Large-hf\` | depth structural control |"
-echo "| \`insightface buffalo_l\` (ArcFace) | face identity embedding |"
+echo "| \`insightface buffalo_l\` (ArcFace) | anchor match embedding |"
+echo
+echo "## LoRAs installed in \`ComfyUI/models/loras\`"
+echo
+# Rule 7 pins every model dependency by size and SHA256, and a LoRA downloaded
+# from a third party is exactly the dependency that needs it: the same filename
+# is reused across revisions, and a swapped file changes the pixels while the
+# config still reads the same. The digest here is what identifies which weights
+# a result came from, and vace_key now hashes the same contents per chunk.
+#
+# Rule 2a decides whether the NAME can be printed. A LoRA named in a tracked
+# config is already public and is named. Anything else is local to this machine,
+# and its author named it after what it makes the model produce - so it is
+# recorded by digest alone. That is not a gap: the digest is the identifier, and
+# the name lives in configs/prompt.local.yaml, which travels in the state bundle.
+LORA_DIR="$PROJ/ComfyUI/models/loras"
+if [ -d "$LORA_DIR" ] && [ -n "$(ls -A "$LORA_DIR" 2>/dev/null)" ]; then
+  echo "| File | Bytes | SHA256 |"
+  echo "|---|---|---|"
+  for f in "$LORA_DIR"/*; do
+    [ -f "$f" ] || continue
+    b="$(basename "$f")"
+    if grep -qF -- "$b" "$PROJ"/configs/*.yaml 2>/dev/null \
+       && ! grep -qF -- "$b" "$PROJ/configs/prompt.local.yaml" 2>/dev/null; then
+      label="\`$b\`"
+    else
+      label="(local, name withheld — rule 2a)"
+    fi
+    echo "| $label | $(stat -c%s "$f") | \`$(sha256sum "$f" | cut -c1-16)…\` |"
+  done
+else
+  echo "No LoRAs are installed on this machine."
+fi
 echo
 echo "## Subject-LoRA training (musubi-tuner)"
 echo
@@ -109,7 +141,7 @@ echo
 echo "- Wan2.1-VACE-**14B** weights — will not fit 12 GB; see \`configs/cloud_14b.yaml\`"
 echo "- extra T2V / I2V checkpoints"
 echo "- acceleration LoRAs (CausVid etc.) — excluded from the baseline by design"
-echo "- GFPGAN / CodeFormer — face-only restoration was explicitly ruled out"
+echo "- GFPGAN / CodeFormer — anchor-only restoration was explicitly ruled out"
 echo "- Real-ESRGAN — optional *post*-restoration resize only, and only if it"
 echo "  beats Lanczos in \`scripts/compare_upscalers.py\`"
 } > "$OUT"

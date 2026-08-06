@@ -1,28 +1,37 @@
 #!/usr/bin/env bash
 # Phase 11b - widen the reference set with generated candidates, then judge them
-# by the same door a photograph goes through.
+# by the same door a real reference goes through.
 #
 # WHAT THIS IS FOR
-# The seventeen photographs were selected for identity evidence, not for pose or
-# lighting coverage, which is why reference-based super-resolution has so little
-# to match against. This generates candidates across a pose and lighting grid
-# using the subject LoRA, and hands the whole set to score_lora_identity.py.
+# The references were selected for match evidence, not for angle or lighting
+# coverage, which is why reference-based super-resolution has so little to match
+# against. This generates candidates across an angle and lighting grid using the
+# subject LoRA - plus any behaviour LoRA the overlay names, stacked with it - and
+# hands the whole set to score_lora_match.py.
 #
 # WHAT DECIDES WHETHER A CANDIDATE IS USABLE - two numbers, not one:
 #
-#   identity   scored against the HELD-OUT photographs only, the three no
-#              training ever saw. Real photographs score ~0.745 on that bank and
-#              the base model with no LoRA scores ~0.023, so both ends of the
-#              scale are known and a candidate can be placed on it.
-#   eye px     inter-ocular distance. A reference can only donate detail it
-#              actually has, and the target face is ~70px. A candidate that
-#              matches the identity but carries no more detail per feature than
-#              the frame is worth nothing as a RefSR reference, however good it
-#              looks.
+#   match      scored against the HELD-OUT references only, the three no training
+#              ever saw. Real references score ~0.745 on that bank and the base
+#              model with no LoRA scores ~0.023, so both ends of the scale are
+#              known and a candidate can be placed on it.
+#   span px    the anchor keypoint span, i.e. how much detail the anchor is drawn
+#              with. A reference can only donate detail it actually has, and the
+#              target's span is ~70px. A candidate that matches on match but
+#              carries no more detail per feature than the frame is worth nothing
+#              as a RefSR reference, however good it looks.
 #
 # A candidate that fails either is not a reference, and nothing here promotes
-# anything into inputs/ automatically: generated images are not photographs of
-# the user, and the decision to treat them as evidence is theirs.
+# anything into inputs/ automatically: a generated image is not a record of the
+# user's subject, and the decision to treat one as evidence is theirs.
+#
+# WHERE THE PROMPT TEXT LIVES
+# The grid's descriptions are conditioning text, and conditioning text describes
+# the subject in order to work - so, like the profile prompts, it lives in the
+# untracked configs/prompt.local.yaml and not here. What stays tracked is the
+# structure: two grids, how they are selected, how they are scored, and that a
+# seed already generated is never generated twice. See common.py, which explains
+# why a functional input is withheld anyway.
 #
 # Rule 1: everything lands on disk. Nothing is displayed.
 #
@@ -46,7 +55,7 @@ STEPS=25
 GRID=head
 # 480x832 portrait: t2v-1.3B declares ('480*832','832*480') as its supported
 # sizes, and the probe runs at 384 warned about exactly that. Portrait also puts
-# the pixels where a head shot needs them.
+# the pixels where a tightly framed anchor needs them.
 W=480
 H=832
 
@@ -59,6 +68,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+case "$GRID" in
+  head|subject|both) ;;
+  *) echo "FATAL: --grid must be head, subject or both" >&2; exit 2 ;;
+esac
+
 LOG="$ROOT/logs/ref_candidates.log"
 mkdir -p "$ROOT/logs" "$OUT"
 say() { echo "[$(date -u +%FT%TZ)] $*" | tee -a "$LOG"; }
@@ -67,6 +81,61 @@ nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1 || {
   echo "FATAL: no CUDA device (rule 3)." >&2; exit 1; }
 [ -f "$LORA" ] || { echo "FATAL: no LoRA at $LORA" >&2; exit 1; }
 [ -f "$DIT" ] || { echo "FATAL: no de-prefixed DiT at $DIT (see prepare_musubi_dit.py)" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# The LoRA stack
+# ---------------------------------------------------------------------------
+# This stage, not VACE, is where a limitation in the base model would actually
+# show. VACE repaints ~4.4% of the subject under a control video that pins every
+# pixel; here the base model draws a whole image from a prompt, unconstrained, so
+# whatever it will not or cannot render it simply does not render. If a behaviour
+# LoRA is ever going to be worth anything to this project, this is the stage that
+# demonstrates it, and the candidates it produces are scored on the same two
+# numbers as everything else - match against the held-out bank, and span px.
+#
+# The subject LoRA stays loaded alongside it. Without it a candidate is not a
+# candidate: the base model with no LoRA scores ~0.023 on the held-out bank.
+#
+# Extra entries come from the untracked overlay, for the reason
+# scripts/common.py::lora_stack gives - a third-party LoRA's filename says what
+# it makes the model produce, which is a category this repo does not state in a
+# tracked file. Names resolve inside ComfyUI/models/loras. EXTRA_LORAS overrides,
+# space-separated, as `path` or `path:multiplier`.
+EXTRA_LORAS="${EXTRA_LORAS:-$(./venv/bin/python -c "
+import yaml
+from pathlib import Path
+try:
+    d = yaml.safe_load(open('configs/prompt.local.yaml')) or {}
+except FileNotFoundError:
+    d = {}
+for e in (d.get('loras') or []):
+    e = {'name': e} if isinstance(e, str) else e
+    if e.get('name'):
+        print(f\"{Path('ComfyUI/models/loras') / e['name']}:{e.get('strength', 1.0)}\")
+" | tr '\n' ' ')}"
+
+LORA_FILES=("$LORA"); LORA_MULTS=("${LORA_STRENGTH:-1.0}")
+for spec in $EXTRA_LORAS; do
+  f="${spec%:*}"; mult="${spec##*:}"
+  [ "$f" = "$mult" ] && mult=1.0
+  [ -f "$f" ] || { echo "FATAL: no LoRA at $f" >&2; exit 1; }
+  LORA_FILES+=("$f"); LORA_MULTS+=("$mult")
+done
+
+# Rule 6: whether this trainer's generator takes more than one --lora_weight is
+# read from the installed source, not assumed from the flag's name. Passing two
+# values to a single-value flag would be a full grid of GPU time spent on either
+# an argparse error or - worse - one silently ignored LoRA.
+if [ "${#LORA_FILES[@]}" -gt 1 ]; then
+  GEN="$MUSUBI_DIR/src/musubi_tuner/wan_generate_video.py"
+  for flag in lora_weight lora_multiplier; do
+    grep -A4 -- "--$flag" "$GEN" | grep -q 'nargs' || {
+      echo "FATAL: $(basename "$GEN") does not declare --$flag as multi-valued in" >&2
+      echo "       the installed revision, so a stack cannot be passed to it." >&2
+      exit 1; }
+  done
+fi
+say "LoRAs: ${#LORA_FILES[@]} ($(printf '%s ' "${LORA_MULTS[@]}"))"
 
 # The trigger comes from dataset.json, which records it, rather than from a
 # caption file beside the crops: the crops are large and regenerable, the split
@@ -81,48 +150,52 @@ sys.exit('dataset.json records no trigger') if not t else print(t)
 [ -n "$TRIGGER" ] || { echo "FATAL: no trigger token in $DATASET/dataset.json" >&2; exit 1; }
 say "trigger '$TRIGGER' | grid $GRID | seeds: $SEEDS | ${W}x${H} | $STEPS steps"
 
-# The grid is pose first, lighting second: pose is what a RefSR matcher aligns
-# on, lighting is what makes a transferred texture look wrong if it disagrees.
-HEAD_VARIANTS=(
-  "head_on:looking straight at the camera, head and shoulders"
-  "turned_left:head turned to the left, head and shoulders"
-  "turned_right:head turned to the right, head and shoulders"
-  "side_on:side view of the head, profile, head and shoulders"
-  "tilted_down:head tilted slightly down, head and shoulders"
-  "soft_daylight:looking at the camera, soft even daylight, head and shoulders"
-  "warm_lamp:looking at the camera, warm indoor lamp light, head and shoulders"
-  "overhead:looking at the camera, overhead room light, slight shadow under the brow"
-)
-
-# Full-figure framing trades face detail for body coverage: the same 480x832
-# canvas now holds a whole person, so pixels per facial feature fall sharply.
-# That is measured, not assumed - the eye px column says how far.
+# The grid varies angle first, lighting second: angle is what a RefSR matcher
+# aligns on, lighting is what makes a transferred texture look wrong if it
+# disagrees. Two grids exist - `anchor` frames the anchor tightly, `extent` frames
+# the whole subject.
 #
-# THE GARMENT WARNING. This LoRA was trained on HEAD CROPS, deliberately, so it
-# knows a face and hair and nothing else. Everything below the neck in these
-# images is the base model inventing clothing, and it is not the clothing in the
-# source interval. docs/STATE.md is explicit that the garment in the source is
-# the sole ground truth and that references may condition identity only. A
-# RefSR model handed one of these transfers texture wholesale and cannot be told
-# to take the face and leave the shirt. Treat them as evidence about build and
-# proportion, never as a garment donor.
-FIGURE_VARIANTS=(
-  "fig_standing_front:full body, standing, facing the camera"
-  "fig_standing_angled:full body, standing, turned slightly away from the camera"
-  "fig_waist_up:from the waist up, facing the camera"
-  "fig_seated:full body, seated"
-  "fig_side:full body, side view"
-  "fig_walking:full body, walking towards the camera"
-  "fig_arms_raised:full body, arms raised"
-  "fig_daylight:full body, standing, soft even daylight"
-)
+# THE ATTRIBUTE WARNING, which is why the `extent` grid is not a free win. This
+# LoRA was trained on tightly framed anchor crops, deliberately, so it knows the
+# anchor region and nothing else. Everything outside that region in these images
+# is the base model inventing attributes, and they are not the attributes in the
+# source interval. docs/STATE.md is explicit that the attribute in the source is
+# the sole ground truth and that references may condition match only. A RefSR
+# model handed one of these transfers texture wholesale and cannot be told to take
+# the anchor and leave the attribute. Treat them as evidence about proportion,
+# never as an attribute donor. The `extent` grid also trades anchor detail for
+# coverage: the same canvas now holds the whole subject, so detail per feature
+# falls sharply - measured, not assumed, in the span px column.
+#
+# The descriptions themselves are conditioning text and live in the untracked
+# overlay, keyed by grid. No default: generating a full grid against wording that
+# is not the wording that produced the recorded numbers spends GPU on results that
+# cannot be compared with them.
+readarray -t VARIANTS < <(./venv/bin/python -c "
+import sys, yaml
+try:
+    d = yaml.safe_load(open('configs/prompt.local.yaml')) or {}
+except FileNotFoundError:
+    sys.exit('configs/prompt.local.yaml is missing; it holds the grid descriptions')
+grid = d.get('candidate_grid') or {}
+want = {'head': ['anchor'], 'subject': ['extent'], 'both': ['anchor', 'extent']}['$GRID']
+out = []
+for k in want:
+    if not grid.get(k):
+        sys.exit(f'configs/prompt.local.yaml: candidate_grid.{k} is empty')
+    out += [f'{name}:{desc}' for name, desc in grid[k].items()]
+print('\\n'.join(out))
+")
+[ "${#VARIANTS[@]}" -gt 0 ] || { echo "FATAL: no grid variants" >&2; exit 1; }
 
-case "$GRID" in
-  head)   VARIANTS=("${HEAD_VARIANTS[@]}") ;;
-  figure) VARIANTS=("${FIGURE_VARIANTS[@]}") ;;
-  both)   VARIANTS=("${HEAD_VARIANTS[@]}" "${FIGURE_VARIANTS[@]}") ;;
-  *) echo "FATAL: --grid must be head, figure or both" >&2; exit 2 ;;
-esac
+# The prompt template, also from the overlay: '{trigger}' and '{desc}' are
+# substituted per variant.
+TEMPLATE="$(./venv/bin/python -c "
+import sys, yaml
+d = yaml.safe_load(open('configs/prompt.local.yaml')) or {}
+t = d.get('candidate_prompt')
+sys.exit('configs/prompt.local.yaml records no candidate_prompt') if not t else print(t)
+")"
 
 for v in "${VARIANTS[@]}"; do
   name=${v%%:*}; desc=${v#*:}
@@ -134,10 +207,11 @@ for v in "${VARIANTS[@]}"; do
     if find "$dst" -name "*_${s}_*" 2>/dev/null | grep -q .; then continue; fi
     "$MUSUBI_DIR/.venv/bin/python" "$MUSUBI_DIR/src/musubi_tuner/wan_generate_video.py" \
         --task t2v-1.3B --dit "$DIT" --vae "$VAE" --t5 "$T5" \
-        --prompt "a photo of $TRIGGER, $desc" \
+        --prompt "$(P="${TEMPLATE//\{trigger\}/$TRIGGER}"; echo "${P//\{desc\}/$desc}")" \
         --video_size "$H" "$W" --video_length 1 --infer_steps "$STEPS" \
         --seed "$s" --attn_mode sdpa --output_type images --save_path "$dst" \
-        --lora_weight "$LORA" --lora_multiplier 1.0 >>"$LOG" 2>&1 || \
+        --lora_weight "${LORA_FILES[@]}" --lora_multiplier "${LORA_MULTS[@]}" \
+        >>"$LOG" 2>&1 || \
         say "  seed $s FAILED (continuing)"
   done
   n=$(find "$dst" -name '*.png' | wc -l | tr -d ' ')
@@ -145,9 +219,9 @@ for v in "${VARIANTS[@]}"; do
 done
 
 say "scoring every candidate against the held-out bank"
-"$ROOT/venv/bin/python" "$ROOT/scripts/score_lora_identity.py" \
+"$ROOT/venv/bin/python" "$ROOT/scripts/score_lora_match.py" \
     --media "$OUT"/*/ --dataset "$DATASET" \
     --out "$OUT/candidate_scores.json" 2>&1 | tee -a "$LOG"
 
-say "Nothing was promoted into inputs/. A generated image is not a photograph of"
-say "the user; whether it counts as a reference is their call, on these numbers."
+say "Nothing was promoted into inputs/. A generated image is not a record of the"
+say "user's subject; whether it counts as a reference is their call, on these numbers."

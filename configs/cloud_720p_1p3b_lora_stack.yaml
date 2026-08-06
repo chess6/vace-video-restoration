@@ -1,0 +1,66 @@
+# The subject LoRA plus a locally-supplied behaviour LoRA, stacked.
+#
+# WHAT THIS IS FOR
+# A base checkpoint can refuse to render, or flatly under-render, a subject it
+# was aligned away from - and it does not announce that. It arrives as output
+# that is bland, averaged, or subtly not what the prompt asked for, which is
+# indistinguishable from the model simply being weak at this, and the pipeline
+# has no measurement that separates the two. If that ever turns out to be what
+# is limiting VACE here, the correct lever is a LoRA rather than a different
+# checkpoint: the checkpoint is VACE, and there is no VACE variant to swap to.
+#
+# Wan2.1 behaviour fine-tunes are distributed overwhelmingly as T2V-1.3B LoRAs,
+# and one of those does bind to VACE 1.3B, because VACE is that backbone plus
+# blocks a T2V LoRA never touches - all 300 modules of the subject LoRA attach
+# for exactly that reason (scripts/verify_lora_loads.py, reports/lora_results.md).
+#
+# WHAT WAS ACTUALLY MISSING
+# Not the binding, and not the config field: the SLOT. `model.lora` held one
+# mapping, `common_models()` emitted one LoraLoaderModelOnly, and run_chunks.py
+# patched the first node of that class. So a behaviour LoRA could only be
+# installed by evicting the subject LoRA - which is the arm that carries match,
+# the only thing the LoRA experiment ever moved (0.023 -> 0.5167 on held-out
+# probes). "Swap the LoRA" was never a two-field change; it was a trade.
+#
+# Adding a second node by hand would have been worse than not doing it: set_input
+# defaults to occurrence 0, so the second LoRA would have kept its build-time
+# name and strength, silently, while the run recorded what the config said.
+#
+# WHY THIS FILE NAMES NO SECOND LORA
+# It cannot. A third-party LoRA is named by its author after what it makes the
+# model produce, so the filename asserts a category about what is being generated
+# of this subject - in a tracked file, which is rule 2a's exact prohibition, and
+# the same reason prompt text was removed from these configs. The entry therefore
+# lives in untracked configs/prompt.local.yaml, which state_bundle.sh already
+# carries between machines:
+#
+#   loras:
+#     - {name: <the file in ComfyUI/models/loras>, strength: 0.6}
+#
+# lora_stack() appends it after the entries below, build_workflows.py wires the
+# node with an empty name so workflows/*.json stays clean, and run_chunks.py
+# fills the name in at run time. With no such overlay entry this file is the
+# plain LoRA arm and says so in its log line, rather than half-running.
+#
+# BEFORE QUOTING A RESULT FROM THIS
+# Two things it does not do. It does not touch the plate: SeedVR2 takes no
+# prompt and no LoRA, and the plate is what carries the measured quality and is
+# what ships (docs/STATE.md). And it does not lift VACE over the bar it already
+# failed - in-mask 8.4 for the LoRA arm against 16.5 for the plate and 9.7 for a
+# plain Lanczos upscale. This makes an untested lever testable. It is not
+# evidence that the lever matters, and a run of it is worth reporting only with
+# the in-mask number beside the plate's.
+#
+# Strength is the free parameter and is deliberately below 1.0: the subject LoRA
+# is at full strength and a behaviour LoRA is patching the same weights.
+extends: cloud_720p_1p3b_lora.yaml
+
+profile: cloud_720p_1p3b_lora_stack
+
+model:
+  # Restated as a LIST, which is the difference this file makes. The subject
+  # LoRA and its strength are the inherited ones, repeated here because a list
+  # replaces the mapping it overrides rather than merging into it.
+  lora:
+    - name:          subject_1p3b_v2.safetensors
+      strength:      1.0

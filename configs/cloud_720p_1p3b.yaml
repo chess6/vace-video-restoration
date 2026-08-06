@@ -1,4 +1,4 @@
-# 720p native profile for a 4:3 source, on rented 24 GB hardware.
+# 720p native profile at 4:3 generation geometry, on rented 24 GB hardware.
 #
 # Derived from local_1p3b.yaml. The one change that matters is the geometry:
 # 960x720 is exact 4:3 and both axes are multiples of 16.
@@ -36,9 +36,19 @@ model:
   # umt5 xxl in ComfyUI is loaded via CLIPLoader with type "wan"
   clip_type: wan
   weight_dtype: default          # fp16 model; ComfyUI picks fp16 on sm_86
-  # Optional subject LoRA, in ComfyUI/models/loras. A LoRA is welded to the
+  # Optional LoRA(s), in ComfyUI/models/loras. A LoRA is welded to the
   # checkpoint above; one trained against a different base will load without
   # complaint and quietly produce nonsense. Leave `name` empty for no LoRA.
+  #
+  # A list is accepted too, and the entries chain in order:
+  #   lora:
+  #     - {name: subject_1p3b_v2.safetensors, strength: 1.0}
+  #     - {name: some_behaviour_lora.safetensors, strength: 0.6}
+  # so a behaviour LoRA no longer costs the run its subject LoRA. Every entry is
+  # checked to bind before any GPU time is spent, and hashed by content into
+  # vace_key. See configs/cloud_720p_1p3b_lora_stack.yaml and
+  # scripts/common.py::lora_stack, including why a third-party LoRA's filename
+  # belongs in the untracked overlay rather than here.
   lora:
     name:            ""
     strength:        1.0
@@ -73,7 +83,7 @@ scene_detect:
 # ---------------------------------------------------------------------------
 # A full-frame restoration pass that runs BEFORE VACE and produces the plate the
 # subject is composited onto. It restores the environment - walls, floor, props,
-# distant people, signage - which VACE is deliberately not asked to touch.
+# distant candidates, signage - which VACE is deliberately not asked to touch.
 #
 # Everything structural is still derived from the ORIGINAL normalized stream:
 # scene cuts, chunk timing, depth, masks and subject tracking never see SeedVR2
@@ -120,7 +130,7 @@ background:
       color_correction: lab      # most faithful of the installed methods
       description: >-
         Prioritises structural and temporal fidelity. Least likely to invent
-        detail, alter signage or mutate distant faces.
+        detail, alter signage or mutate distant anchors.
 
     # More plausible environmental detail, accepting more invention. Use when the
     # source is degraded enough that faithful restoration still looks broken.
@@ -131,7 +141,7 @@ background:
       color_correction: wavelet  # keeps generated high-frequency detail
       description: >-
         Reconstructs stronger plausible environmental detail. Expect more
-        invented texture, and check signage and distant faces before trusting it.
+        invented texture, and check signage and distant anchors before trusting it.
 
     # 7B's detail without 7B's chroma noise - the open question the user can see
     # in the output. 7B measured ~3x the coloured static of 3B at denoise 1.0
@@ -156,7 +166,7 @@ background:
         7B at reduced denoise with lab colour matching. Tests whether the
         detail 7B adds can be had without the coloured static it adds with it.
 
-# Whole-body pose control (SDPose, native to the pinned ComfyUI).
+# Whole-extent pose control (SDPose, native to the pinned ComfyUI).
 # An ALTERNATIVE to depth, never blended with it: VACE is trained on individual
 # control representations, and an averaged mixture is an input it has never seen.
 pose:
@@ -169,21 +179,21 @@ pose:
   draw_feet: true
   draw_head: true
   stick_width: 4
-  face_point_size: 3
+  anchor_point_size: 3
   score_threshold: 0.3
 
 control:
   # Structural control profile. Depth is the baseline because the goal is to keep
-  # the whole figure's shape, volume and motion, not just facial landmarks.
+  # the whole subject's shape, volume and motion, not just the anchor's keypoints.
   #
   #   depth  (default)  Depth Anything V2 Large. Carries volume and occlusion.
   #   canny             scripts/make_depth.py --mode canny. No model, no VRAM.
   #                     Silhouette and creases only, no volume. Kept for
   #                     comparison; do not switch to it without testing.
-  #   pose              SDPose whole-body (body + hands + face), native to the
-  #                     pinned ComfyUI revision. Carries articulation and hand
-  #                     position, which depth alone renders poorly at this
-  #                     source resolution, but discards clothing silhouette.
+  #   pose              SDPose whole-extent (extent + hands + anchor), native to the
+  #                     pinned ComfyUI revision. Carries articulation and the
+  #                     position of the extremities, which depth alone renders poorly at this
+  #                     source resolution, but discards attributes silhouette.
   #                     Compared against depth rather than blended with it: the
   #                     model is not trained on an arbitrary mixture.
   #
@@ -214,22 +224,22 @@ sampling:
 #             bit-exact, at the cost of a real edge to manage.
 #
 # The band is deliberately narrow: a wide ramp is what produces halos and the
-# pasted-on look around hair and clothing edges. Feathering happens exactly once
+# pasted-on look around the subject's outline and attribute edges. Feathering happens exactly once
 # on each path - the workflow's FeatherMask for in_vace, this band for composite.
 # Region-of-interest generation.
 #
-# The figure occupies a small part of a 320x240 source, so full-frame generation
+# The subject occupies a small part of the frame, so full-frame generation
 # spends nearly all of its capacity on background it was asked to preserve.
 # Cropping to the subject and scaling that crop to the same canvas gives the
-# figure several times the pixels for the same compute.
+# subject several times the pixels for the same compute.
 #
 # Every value here trades subject resolution against context and stability. More
-# zoom means more detail on the face and garments but less of the scene the model
+# zoom means more detail on the anchor and attributes but less of the scene the model
 # needs in order to get an interaction right, and a tighter crop is more prone to
 # visible jitter.
 roi:
   enabled: true
-  # Fraction of the CROP height the figure should fill. The brief asks for
+  # Fraction of the CROP height the subject should fill. The brief asks for
   # 60-80%; the planner aims at the lower bound and reports what it achieved,
   # because guaranteeing the upper bound would clip context on wide poses.
   # Aim at the TOP of the range, not the bottom. At 0.60 a subject that already
@@ -238,7 +248,7 @@ roi:
   target_height_fraction: 0.78
   target_height_fraction_max: 0.80
   # Percentile of per-frame subject height used to fix the shot's single scale.
-  # Not the max: one frame with a raised arm would otherwise shrink every frame.
+  # Not the max: one frame with an outstretched extremity would otherwise shrink every frame.
   height_percentile: 90
   # Percentile of per-frame box size the crop must still contain. Using the max
   # here lets one outlier frame force a full-frame crop and cancel the zoom.
@@ -246,15 +256,15 @@ roi:
   # Below this scale the crop is not worth the extra machinery, and the script
   # says so rather than pretending a 1.02x crop achieved something.
   min_useful_scale: 1.15
-  # Extra room around the subject for hands, contacted objects, the person being
-  # interacted with, and the contact shadow.
+  # Extra room around the subject for its extremities, contacted objects, any
+  # candidate being interacted with, and the contact shadow.
   # Context kept around the subject box. Tightening this is what buys the zoom,
   # so it is validated rather than assumed: check_context() below measures how
-  # much of the mask, and of any interacting person or held object, actually
+  # much of the mask, and of any interacting candidate or held object, actually
   # survives the crop, and the ROI is rejected if too much is lost.
   context_margin: 0.18
   # Reject the ROI if more than this fraction of subject pixels falls outside the
-  # crop on any frame - clipping a hand is worse than a softer image.
+  # crop on any frame - clipping an extremity is worse than a softer image.
   max_subject_clip: 0.02
   # Reject if the crop moves more than this per frame: visible jitter after
   # upscaling costs more than the resolution gained.
@@ -264,7 +274,7 @@ roi:
   # Ignore crop movement below this many pixels, so a still subject gets a
   # genuinely still crop. Jitter is very visible after upscaling.
   deadband_px: 2.0
-  # Shift the box up slightly: the head carries identity, the feet rarely do.
+  # Shift the box up slightly: the anchor carries match, the far end rarely does.
   vertical_bias: 0.05
 
 composite:
@@ -278,12 +288,12 @@ composite:
   # Erode the hard mask by half the band before ramping, so the ramp straddles
   # the true silhouette instead of eating into the subject.
   center_band: true
-  # Layer 3 - the foreground kept ABOVE the generated figure. Its pixels come
+  # Layer 3 - the foreground kept ABOVE the generated subject. Its pixels come
   # from the restored plate, so an occluder still gains SeedVR2's detail without
   # ever passing through VACE.
   #
   # The boundary is ONE-SIDED: the ramp lies entirely inside the occluder, so it
-  # can only lose it a sliver, never let the generated figure spread over whoever
+  # can only lose it a sliver, never let the generated subject spread over whoever
   # is in front. The core stays fully opaque.
   occluder_band_px: 2
   # Carry this fraction of the previous frame's foreground alpha. The occluder is
@@ -293,7 +303,7 @@ composite:
   occluder_temporal_smooth: 0.35
 
 mask:
-  # Feather radius in pixels applied to the tracked figure mask.
+  # Feather radius in pixels applied to the tracked subject mask.
   # NOT applied in-graph. ComfyUI's native FeatherMask ramps the canvas border
   # (leftmost N columns, topmost N rows), not the subject contour - verified in
   # comfy_extras/nodes_mask.py at the pinned revision. The contour ramp lives in
@@ -305,19 +315,26 @@ mask:
   # WHITE = regenerate. The tracker writes subject=white by default.
   polarity: white_is_regenerate
 
+# Conditioning text.
+#
+# What is below is a category-free default: it runs, and it says nothing about
+# what is being restored. The wording actually used is overlaid at load time from
+# configs/prompt.local.yaml, which is untracked - see common.py::_apply_prompt_overlay
+# for why a functional input is nonetheless withheld. Reproducing a recorded
+# number needs the overlay that produced it; the default will not reproduce it.
 prompt:
   positive: >-
-    the same person, identical face and facial features, identical hairstyle and hair colour,
-    identical clothing with the same garments, colours, patterns, textures and accessories,
-    consistent body proportions and silhouette, natural skin texture and fabric detail,
-    sharp accurate detail, following the original pose, motion, lighting direction and
-    camera perspective, matching the surrounding scene
+    the same subject, identical appearance, identical attributes in the same colours,
+    patterns, textures and accessories, consistent proportions and silhouette,
+    natural surface texture and material detail, sharp accurate detail, following the
+    original motion, lighting direction and camera perspective, matching the
+    surrounding scene
   negative: >-
-    different person, face swap, changed identity, changed clothing, changed colours,
-    redesigned outfit, new background, altered scene, extra limbs, extra fingers,
-    deformed hands, distorted anatomy, duplicated body parts, warping, morphing,
-    flickering, ghosting, blurry, low quality, jpeg artifacts, oversaturated,
-    cartoon, anime, painting, illustration, text, watermark, caption, logo, border
+    a different subject, substituted appearance, altered attributes, changed colours,
+    redesigned attributes, new background, altered scene, duplicated or malformed
+    structure, warping, morphing, flickering, ghosting, blurry, low quality,
+    jpeg artifacts, oversaturated, cartoon, anime, painting, illustration, text,
+    watermark, caption, logo, border
 
 output:
   # fps of the restored 480p master before any interpolation stage

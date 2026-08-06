@@ -29,10 +29,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from approve_tracking import approval_valid  # noqa: E402
 from build_workflows import graph_name  # noqa: E402
 from comfy_client import ComfyClient, load_api_workflow, set_input  # noqa: E402
+from verify_lora_loads import require_binding  # noqa: E402
 from common import (  # noqa: E402
-    P, assert_aligned, check_geometry, file_digest, generation_key, human_time,
-    load_config, load_manifest, probe_frames, rel, run, save_manifest,
-    setup_logging, slice_frames,
+    P, assert_aligned, cached_file_digest, check_geometry, file_digest,
+    generation_key, human_time, load_config, load_manifest, lora_stack,
+    probe_frames, rel, run, save_manifest, setup_logging, slice_frames,
 )
 
 # Key under which the unablated run is recorded. Its fields are also mirrored to
@@ -84,6 +85,26 @@ def record_run(c: dict, variant: str, **fields) -> None:
     c.setdefault("runs", {}).setdefault(variant, {}).update(fields)
     if variant == BASELINE:
         c.update(fields)
+
+
+def checkpoint_changed(c: dict, variant: str, digest: str | None) -> bool:
+    """Were these pixels made by different weights than the ones now configured?
+
+    `vace_key` records the checkpoint by NAME. That was safe while there was one
+    checkpoint and it came from `download_models.sh` with a recorded SHA256; it
+    stops being safe the moment a UNet is swapped for a community fine-tune or a
+    grafted one, because those arrive, get re-downloaded, get re-quantised and
+    get rebuilt - all under a filename someone chose.
+
+    The digest is not folded into `vace_key` deliberately. Doing so would move
+    every key this project has ever recorded and mark every finished chunk stale
+    for a checkpoint nobody swapped, which is ~18 GPU minutes each to reproduce
+    identical pixels. So it lives beside the key, and a record that predates it
+    is treated as no information rather than as a mismatch: only a digest that
+    is present AND different invalidates a result.
+    """
+    seen = (c.get("runs", {}).get(variant) or {}).get("model_digest")
+    return bool(seen and digest and seen != digest)
 
 
 def needs_run(c: dict, variant: str, key: str) -> bool:
@@ -164,9 +185,9 @@ def main() -> int:
     var.add_argument("--no-mask", action="store_true",
                      help="Ablation: drop the subject mask ONLY, keeping the reference")
     var.add_argument("--protected", action="store_true",
-                     help="Regenerate ONLY the protected-apparel submask "
-                          "(confidently exposed identity regions) instead of the "
-                          "whole figure. Garments, coverings and every uncertain "
+                     help="Regenerate ONLY the protected-attribute submask "
+                          "(confidently exposed match regions) instead of the "
+                          "whole subject. Attributes, coverings and every uncertain "
                           "pixel stay black and come from the plate. Requires "
                           "scripts/make_protected_mask.py.")
     var.add_argument("--roi", action="store_true",
@@ -184,6 +205,10 @@ def main() -> int:
                          "be generated, then stop without touching the GPU. "
                          "Use this to verify a guard rather than discovering it "
                          "passed by watching a chunk start rendering.")
+    ap.add_argument("--skip-lora-binding-check", action="store_true",
+                    help="Do not verify that the configured LoRA binds to the "
+                         "checkpoint. Only for when it has already been checked "
+                         "with scripts/verify_lora_loads.py on this machine.")
     ap.add_argument("--timeout", type=float, default=5400)
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
@@ -240,7 +265,7 @@ def main() -> int:
     # ---- refuse to generate on unsettled tracking ----------------------------
     # A chunk costs ~18 minutes of GPU. Previously an ambiguous or unreviewed
     # track was logged and then generated on anyway, which is how a confidently
-    # tracked WRONG PERSON reached four finished variants. Ambiguity is a stop,
+    # tracked WRONG CANDIDATE reached four finished variants. Ambiguity is a stop,
     # not a note.
     if use_mask:
         blocked: list[str] = []
@@ -262,7 +287,7 @@ def main() -> int:
             for b in blocked:
                 log.error("  %s", b)
             log.error("Look at intermediate/masks/review/<shot>_review.png and "
-                      "confirm the highlighted figure is the right person.")
+                      "confirm the highlighted subject is the right candidate.")
             log.error("Then either re-seed it:")
             log.error("  scripts/track_subject.py --shot <shot> --init-box "
                       "x0,y0,x1,y1 --seed-frame N")
@@ -279,7 +304,7 @@ def main() -> int:
     if args.protected and not use_bg:
         # Not an error - a plate-free run is a legitimate ablation - but it is
         # almost never what someone asking for --protected wants. The protected
-        # path regenerates ~4% of the figure precisely BECAUSE the plate is
+        # path regenerates ~4% of the subject precisely BECAUSE the plate is
         # supposed to supply the rest; without it, 96% of the output is the
         # unrestored original and the result looks like the source, because it
         # nearly is. Say so at the top, where it will be read before 8 GPU
@@ -297,9 +322,9 @@ def main() -> int:
     log.info("Variant: %s", variant)
 
     # Per-shot reference pack when one exists, global sheet otherwise. The pack
-    # is per APPEARANCE: it never mixes two outfits into one conditioning image,
-    # and its clothing panel comes from this interval rather than from a
-    # photograph taken elsewhere.
+    # is per APPEARANCE: it never mixes two appearances into one conditioning image,
+    # and its attributes panel comes from this interval rather than from a
+    # reference taken elsewhere.
     def sheet_for(c: dict) -> Path:
         shot = next((s for s in man["shots"] if s["shot_id"] == c["shot_id"]), None)
         pack = (shot or {}).get("reference_pack") or {}
@@ -349,6 +374,17 @@ def main() -> int:
             files["roi_mask"] = rd / f"{sid}_mask_roi.mkv"
         return files
 
+    # Hoisted out of vace_key: the stack is the same for every chunk, and each
+    # entry costs a full read of a LoRA file to digest.
+    lora_parts = [{"name": e["name"], "strength": e["strength"],
+                   "digest": file_digest(P.comfy / "models" / "loras" / e["name"])}
+                  for e in lora_stack(cfg)]
+    # Which WEIGHTS, not which filename. Cached against size and mtime, because
+    # hashing a checkpoint is a minute of I/O: once per run is provenance, once
+    # per chunk is a tax. See checkpoint_changed().
+    model_digest = cached_file_digest(
+        P.comfy / "models" / "diffusion_models" / cfg["model"]["diffusion_model"])
+
     def vace_key(c: dict) -> str:
         """What determines this chunk's GENERATED pixels, and nothing else.
 
@@ -374,6 +410,18 @@ def main() -> int:
             "denoise": cfg["sampling"]["denoise"],
             "vace_strength": cfg["sampling"]["vace_strength"],
             "model": cfg["model"], "workflow": wf_name,
+            # The LoRA stack by CONTENT, not by the name in cfg["model"].
+            #
+            # docs/STATE.md's rule - hash contents, never a config key - was
+            # never applied to the LoRA, and for a locally trained one the gap
+            # was academic: the file that name refers to is the file this repo
+            # produced. It stops being academic the moment a LoRA arrives from
+            # outside, because a re-download, a v2 under the same filename or a
+            # different machine's copy all key identically to the old weights
+            # while producing different pixels. Absent from the key entirely
+            # when the stack is empty, so every no-LoRA result keeps the key it
+            # already has and nothing goes stale for a feature it does not use.
+            **({"loras": lora_parts} if lora_parts else {}),
             "width": c["width"], "height": c["height"], "length": c["n_frames"],
             "background_profile": args.background,
         })
@@ -426,7 +474,12 @@ def main() -> int:
             if run_status(c, variant) == "done" and adopt_legacy_run(c, key, log):
                 adopted += 1
                 continue
-            if not needs_run(c, variant, key):
+            if checkpoint_changed(c, variant, model_digest):
+                log.info("%s: produced by a different checkpoint than the one "
+                         "configured (%s -> %s); regenerating.", c["chunk_id"],
+                         (c.get("runs", {}).get(variant) or {}).get("model_digest"),
+                         model_digest)
+            elif not needs_run(c, variant, key):
                 continue
             if run_status(c, variant) == "done":
                 prev = (c.get("runs", {}).get(variant) or {}).get("vace_key")
@@ -514,23 +567,46 @@ def main() -> int:
     # time. Check it here, in the pre-flight, so --dry-run catches it: finding
     # this out by starting a real generation costs ~18 GPU minutes and produces
     # a result whose recorded LoRA never touched the pixels.
-    _lora_cfg = ((cfg["model"].get("lora") or {}).get("name") or "")
-    _wf_has_lora = any(n.get("class_type") == "LoraLoaderModelOnly"
-                       for n in load_api_workflow(wf_path).values())
-    if bool(_lora_cfg) != _wf_has_lora:
-        log.error("Config %s LoRA but %s %s one. Rebuild first: "
-                  "scripts/build_workflows.py --config %s",
-                  "names a" if _lora_cfg else "names no",
-                  wf_path.name, "has" if _wf_has_lora else "has no",
+    # Name AND digest, so a log says which weights ran and not merely which file
+    # was asked for. scripts/verify_checkpoint.py is what to run before trusting
+    # a checkpoint that did not come from download_models.sh.
+    log.info("Checkpoint: %s (digest %s)", cfg["model"]["diffusion_model"],
+             model_digest)
+    lora_cfg_stack = lora_stack(cfg)
+    _wf_loras = [n for n in load_api_workflow(wf_path).values()
+                 if n.get("class_type") == "LoraLoaderModelOnly"]
+    if len(lora_cfg_stack) != len(_wf_loras):
+        log.error("Config names %d LoRA(s) but %s carries %d LoRA node(s). "
+                  "Rebuild first: scripts/build_workflows.py --config %s",
+                  len(lora_cfg_stack), wf_path.name, len(_wf_loras),
                   cfg.get("_config_path"))
         return 1
-    if _lora_cfg:
-        _lp = P.comfy / "models" / "loras" / _lora_cfg
+    for _i, _ent in enumerate(lora_cfg_stack):
+        _lp = P.comfy / "models" / "loras" / _ent["name"]
         if not _lp.exists():
-            log.error("LoRA %s is not in %s", _lora_cfg, _lp.parent)
+            log.error("LoRA %s is not in %s", _ent["name"], _lp.parent)
             return 1
-        log.info("Subject LoRA: %s @ %.2f", _lora_cfg,
-                 float((cfg["model"].get("lora") or {}).get("strength", 1.0)))
+        log.info("LoRA %d/%d: %s @ %.2f (from the %s)", _i + 1, len(lora_cfg_stack),
+                 _ent["name"], _ent["strength"], _ent["source"])
+        # Present on disk and wired into the graph still does not mean it
+        # reaches the weights: a key-name mismatch is not an error ComfyUI
+        # raises. Checking it here is what separates "a LoRA was configured"
+        # from "a LoRA conditioned these pixels".
+        #
+        # Every entry is checked, not just the first. A stack is not one
+        # gamble but N: a behaviour LoRA downloaded from a third party has
+        # whatever key naming its author's trainer emitted, and if it alone
+        # fails to bind the run still loads the subject LoRA, still produces
+        # plausible frames, and still records both in its key - which is the
+        # eight-identical-checkpoints failure (docs/STATE.md) with an extra
+        # LoRA's worth of confidence attached to it.
+        if not args.skip_lora_binding_check:
+            _ckpt = P.comfy / "models" / "diffusion_models" / cfg["model"]["diffusion_model"]
+            if not _ckpt.exists():
+                log.error("Checkpoint %s is not in %s", _ckpt.name, _ckpt.parent)
+                return 1
+            if not require_binding(_lp, _ckpt, log):
+                return 1
 
     if args.dry_run:
         log.info("=" * 62)
@@ -608,7 +684,7 @@ def main() -> int:
                 # over, and the user's first observation was that they looked no
                 # better than the source, which is exactly what they were.
                 log.info("Regenerating the PROTECTED submask only: %.2f%% of the "
-                         "figure; the remaining %.2f%% (garment, covering, every "
+                         "subject; the remaining %.2f%% (attribute, covering, every "
                          "uncertain pixel) comes from %s.",
                          100 * (shot["protected_mask"]["regenerable_fraction"]),
                          100 * (shot["protected_mask"]["protected_fraction"]),
@@ -679,31 +755,31 @@ def main() -> int:
             _m = cfg["model"]
             set_input(wf, "UNETLoader", "unet_name", _m["diffusion_model"])
             set_input(wf, "UNETLoader", "weight_dtype", _m["weight_dtype"])
-            # The subject LoRA has the same problem and one difference: whether
-            # a LoraLoaderModelOnly node exists at all is decided at BUILD time,
-            # so a config that turns one on cannot be patched in - the node is
-            # not there to patch. vace_key hashes cfg["model"] entire, LoRA
-            # included, so without this check a run would record a LoRA it never
-            # applied, and the result would look reproducible forever.
-            _lora = (_m.get("lora") or {}).get("name") or ""
-            _has_node = any(n.get("class_type") == "LoraLoaderModelOnly"
-                            for n in wf.values())
-            if _lora and not _has_node:
-                log.error("Config asks for LoRA %s but %s has no LoRA node. "
+            # The LoRA stack has the same problem and one difference: how many
+            # LoraLoaderModelOnly nodes exist is decided at BUILD time, so a
+            # config that adds one cannot be patched in - the node is not there
+            # to patch. The names and strengths ARE patched, every one of them,
+            # because an overlay-supplied LoRA is deliberately built with an
+            # empty name and only ever gets a real one here.
+            #
+            # Patching by occurrence, not by class: set_input defaults to the
+            # first node of a class, so a stack patched the old way would have
+            # left every LoRA after the first at its build-time value.
+            _n_nodes = sum(n.get("class_type") == "LoraLoaderModelOnly"
+                           for n in wf.values())
+            if len(lora_cfg_stack) != _n_nodes:
+                log.error("Config names %d LoRA(s) but %s carries %d node(s). "
                           "Rebuild: scripts/build_workflows.py --config %s",
-                          _lora, wf_path.name, cfg.get("_config_path"))
+                          len(lora_cfg_stack), wf_path.name, _n_nodes,
+                          cfg.get("_config_path"))
                 return 1
-            if _has_node and not _lora:
-                log.error("%s carries a LoRA node but the config names none. "
-                          "Rebuild before running, or the generation is "
-                          "conditioned by a LoRA nothing recorded.", wf_path.name)
-                return 1
-            if _lora:
-                set_input(wf, "LoraLoaderModelOnly", "lora_name", _lora)
+            for _i, _ent in enumerate(lora_cfg_stack):
+                set_input(wf, "LoraLoaderModelOnly", "lora_name", _ent["name"],
+                          occurrence=_i)
                 set_input(wf, "LoraLoaderModelOnly", "strength_model",
-                          float((_m.get("lora") or {}).get("strength", 1.0)))
-                log.info("Subject LoRA: %s @ %.2f", _lora,
-                         float((_m.get("lora") or {}).get("strength", 1.0)))
+                          float(_ent["strength"]), occurrence=_i)
+                log.info("LoRA %d/%d: %s @ %.2f", _i + 1, len(lora_cfg_stack),
+                         _ent["name"], _ent["strength"])
             set_input(wf, "LoadVideo", "file", src_name, title_contains="source")
             set_input(wf, "LoadVideo", "file", dep_name, title_contains="depth")
             if use_mask:
@@ -750,6 +826,8 @@ def main() -> int:
                        workflow=wf_name, use_mask=use_mask, use_reference=use_ref,
                        background_profile=args.background,
                        reference_image=rel(sheet_for(c)),
+                       model=cfg["model"]["diffusion_model"],
+                       model_digest=model_digest,
                        vace_key=key_before,
                        inputs_changed_during_run=(key_after if status == "stale"
                                                   else None),
