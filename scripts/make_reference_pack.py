@@ -87,20 +87,32 @@ HEAD = {"hair", "face", "hat", "sunglasses", "scarf"}
 COVERING = {"hat", "sunglasses", "scarf"}
 
 
-def identity_regions(labels: np.ndarray, allowed: set | None = None) -> np.ndarray:
+def identity_regions(labels: np.ndarray, allowed: set | None = None,
+                     keep: set | None = None) -> np.ndarray:
     """Boolean mask of the pixels of an external photo that may be shown.
 
     `allowed` narrows IDENTITY_ONLY further for one shot. It is how a covered
     source face is protected: with "face" removed, an external photograph of an
     uncovered face contributes hair and nothing else, so it cannot instruct the
-    model to take the covering off.
+    model to take the covering off. It can only ever narrow - intersecting is
+    the safety property, so a caller passing a wider set gets the narrow one.
+
+    `keep` REPLACES the set instead of narrowing it, and exists for callers
+    outside the reference pack that mean something different by identity -
+    grey_candidate_garments.py keeps skin as well as head, on the user's
+    instruction, for a transfer path where nothing regenerates the garment.
+    Anything on the pack's own path passes `allowed` and cannot widen anything.
     """
-    names = IDENTITY_ONLY if allowed is None else (set(allowed) & IDENTITY_ONLY)
+    if keep is not None:
+        names = set(keep)
+    else:
+        names = IDENTITY_ONLY if allowed is None else (set(allowed) & IDENTITY_ONLY)
     ids = [i for i, n in LBL.items() if n in names]
     return np.isin(labels, ids)
 
 
-def mask_to_identity(im, labels, feather: int = 3, allowed: set | None = None):
+def mask_to_identity(im, labels, feather: int = 3, allowed: set | None = None,
+                     keep: set | None = None):
     """Blank everything that is not identity in an external reference.
 
     Garments, accessories and background are removed rather than dimmed: a faint
@@ -110,7 +122,7 @@ def mask_to_identity(im, labels, feather: int = 3, allowed: set | None = None):
     """
     from PIL import Image
     arr = np.asarray(im).astype(np.float32)
-    hard = identity_regions(labels, allowed)
+    hard = identity_regions(labels, allowed, keep)
     m = hard.astype(np.float32)
     if feather > 0:
         import cv2

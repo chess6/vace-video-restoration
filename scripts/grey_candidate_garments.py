@@ -19,10 +19,26 @@ plain outward blur was measured leaving up to 83/255 of the original pixel in a
 ring around the head - and the pixels around a head are neck and shoulders,
 which is exactly the hint that would instruct a model about sleeves.
 
-`IDENTITY_ONLY` is `{hair, face}`. Arms and legs are not kept: how much limb is
-visible IS sleeve and hemline information.
+SCOPE. Two rules are available and they disagree on limbs.
 
-    scripts/grey_candidate_garments.py --in DIR [--out DIR] [--min-kept 0.02]
+  `head`          {hair, face}. The rule make_reference_pack.py enforces, on the
+                  reasoning recorded there: how much arm or leg is visible is a
+                  fact about what the person is WEARING, so a reference with bare
+                  arms instructs a generative model to remove the source's
+                  sleeves.
+  `not_clothing`  {hair, face, arms, legs} - everything the parser does not call
+                  a garment, an accessory or background. The default here, at the
+                  user's instruction.
+
+The sleeve hazard is real but belongs to a path that is now closed: it was about
+CONDITIONING a model that regenerates the garment, and VACE is out - the plate
+supplies the garment and nothing regenerates it. What remains is the transfer
+hazard: a RefSR step matching across the whole figure could paste the
+reference's bare skin where the source has a sleeve. The mitigation is to
+restrict the transfer region rather than to blind the reference, which is why
+this default is safe HERE and would not be safe in the reference pack.
+
+    scripts/grey_candidate_garments.py --in DIR [--scope not_clothing|head]
 """
 from __future__ import annotations
 
@@ -43,6 +59,10 @@ def main() -> int:
     ap.add_argument("--in", dest="src", type=Path, required=True,
                     help="Directory of generated candidates (searched recursively)")
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--scope", choices=["not_clothing", "head"],
+                    default="not_clothing",
+                    help="not_clothing keeps skin and hair; head keeps only "
+                         "{hair, face}, the reference-pack rule")
     ap.add_argument("--feather", type=int, default=3)
     ap.add_argument("--min-kept", type=float, default=0.01,
                     help="Reject a candidate keeping less than this fraction: "
@@ -53,23 +73,35 @@ def main() -> int:
 
     log = setup_logging("grey_candidate_garments", args.verbose)
     from PIL import Image
-    from make_reference_pack import IDENTITY_ONLY, Parser, mask_to_identity
+    from make_reference_pack import (GARMENT, IDENTITY_ONLY, LBL, Parser,
+                                     mask_to_identity)
+
+    if args.scope == "head":
+        keep = set(IDENTITY_ONLY)
+    else:
+        # Inverse rule: anything the parser does not call a garment, an
+        # accessory or background. Derived from the label map rather than
+        # listed, so a change to GARMENT cannot leave a stale set behind.
+        keep = {n for n in LBL.values()
+                if n not in GARMENT and n not in {"background", "sunglasses"}}
 
     files = sorted(f for f in args.src.rglob("*") if f.suffix.lower() in IMG_EXT)
     if not files:
         log.error("No images under %s", args.src)
         return 1
     out_root = args.out or (args.src.parent / (args.src.name + "_identity_only"))
-    log.info("%d candidate(s); keeping %s and greying the rest",
-             len(files), sorted(IDENTITY_ONLY))
+    log.info("%d candidate(s); scope=%s keeps %s, everything else goes grey",
+             len(files), args.scope, sorted(keep))
 
     parser = Parser(log)
-    manifest = {"source": str(args.src), "kept_labels": sorted(IDENTITY_ONLY),
+    manifest = {"source": str(args.src), "scope": args.scope,
+                "kept_labels": sorted(keep),
                 "feather": args.feather, "images": [], "rejected": []}
     for f in files:
         im = Image.open(f).convert("RGB")
         labels = parser.parse(im)
-        greyed, kept = mask_to_identity(im, labels, feather=args.feather)
+        greyed, kept = mask_to_identity(im, labels, feather=args.feather,
+                                        keep=keep)
         rel = f.relative_to(args.src)
         if kept < args.min_kept:
             manifest["rejected"].append({"file": str(rel), "kept": round(kept, 5)})
@@ -86,9 +118,9 @@ def main() -> int:
     log.info("=" * 62)
     log.info("%d written, %d rejected -> %s", len(manifest["images"]),
              len(manifest["rejected"]), out_root)
-    log.info("These carry a face and hair on neutral grey. They are identity "
-             "evidence and a face-region donor; they are not, and cannot become, "
-             "a garment donor.")
+    log.info("These carry %s on neutral grey. They are identity evidence and a "
+             "donor for those regions; they are not, and cannot become, a "
+             "garment donor.", ", ".join(sorted(keep)))
     return 0
 
 
