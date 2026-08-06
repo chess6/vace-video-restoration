@@ -27,7 +27,6 @@ from typing import Any, Iterable
 # a DISPLAY-derived backend must never win here.
 os.environ["MPLBACKEND"] = "Agg"
 
-import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -281,6 +280,12 @@ def load_config(path: str | Path | None = None) -> dict:
     The merge is deep and the deriving file wins, so a nested key can be
     overridden without restating its siblings.
     """
+    # Imported here, not at module scope: inspect_allowed.py is the gate that
+    # enforces a privacy rule, and it has to run on a laptop with no venv. A
+    # top-level PyYAML import made the guard unavailable exactly where the
+    # user's media actually lives.
+    import yaml
+
     path = Path(path) if path else P.configs / "local_1p3b.yaml"
     if not path.is_absolute():
         path = PROJECT_ROOT / path
