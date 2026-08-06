@@ -154,7 +154,7 @@ def main() -> int:
             lines.append("Adding the background stage therefore costs roughly "
                          f"{100 * totals[cheap_bg]['seconds'] / max(totals[cheap_v]['seconds'], 1):.0f}% "
                          "on top of VACE alone, for a restoration that covers the "
-                         "entire frame rather than just the figure.\n")
+                         "entire frame rather than just the subject.\n")
     lines.append("\n> These come from a very small number of samples on one clip. "
                  "They are the right order of magnitude, not a schedule. Re-run "
                  "this after more chunks have completed before planning around "

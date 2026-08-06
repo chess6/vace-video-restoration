@@ -1,6 +1,6 @@
 # inputs/references/
 
-Put your higher-quality stills of the main figure here. **PNG, JPEG or WebP.**
+Put your higher-quality stills of the main subject here. **PNG, JPEG or WebP.**
 
 These files are opened read-only. Nothing in this pipeline modifies, renames or
 re-encodes them.
@@ -9,24 +9,24 @@ re-encodes them.
 
 In priority order:
 
-1. **A full-body shot.** The most valuable single reference. Facial *and* body
-   detail both matter here, and the full body is what carries clothing,
+1. **A full-extent shot.** The most valuable single reference. Anchor detail *and*
+   extent detail both matter here, and the full extent is what carries attributes,
    silhouette, proportions and accessories.
-2. **A clear face shot.** As sharp and front-on as you have.
-3. **An alternate angle** — side or back — so the model has something to work
-   from when the figure turns away from camera.
+2. **A clear anchor shot.** As sharp and front-on as you have.
+3. **An alternate angle** — from the side or from behind — so the model has
+   something to work from when the subject turns away from camera.
 
 ## Constraints
 
 - Minimum **256 px** on the short side; smaller images are rejected.
-- Photos with **other people** in them are handled: faces are clustered and
-  images whose face does not match the dominant identity are dropped. Still,
-  prefer photos where your subject is clearly the subject.
+- Images containing **other candidates** are handled: anchors are clustered and
+  images whose anchor does not match the dominant one are dropped. Still, prefer
+  images where your subject is clearly the subject.
 - Near-duplicates are detected automatically and the sharper copy is kept.
 - Only **three** views reach the final sheet, because `WanVaceToVideo` consumes
   exactly one reference image (`reference_image[:1]`) and the views are tiled
-  into it. Extra photos are still useful: they widen the selection pool and
-  strengthen the identity match used for subject tracking.
+  into it. Extra references are still useful: they widen the selection pool and
+  strengthen the match evidence used for subject tracking.
 
 ## Then run
 

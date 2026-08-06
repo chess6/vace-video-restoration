@@ -9,10 +9,10 @@ seam blender here would blend seams that do not exist.
 
 WHY IT IS NOT `ffmpeg -i bg_*.mkv`
 A clip with a scene cut in it becomes several shots, each chunked and each
-padded to the 4n+1 the model requires. One 33-second clip came back as five
-chunks totalling 893 frames for 528 real ones - 69% of it padding and shot
-boundaries. Taking the first plate delivers a fragment; concatenating all of
-them delivers the padding too. This walks the manifest, takes each chunk's real
+padded to the 4n+1 the model requires. On a measured clip the chunks together
+held roughly 1.7x the real frames - the rest padding and shot boundaries.
+Taking the first plate delivers a fragment; concatenating all of them delivers
+the padding too. This walks the manifest, takes each chunk's real
 frame span, and trims the result to the clip's true length.
 
 Verified by frame count, not by exit code (rule 4): the output must contain

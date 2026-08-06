@@ -6,9 +6,9 @@ pixels, and its own review sheet has no axes - so a reviewer has to count grid
 squares to produce them, which is slow and easy to get wrong. This burns the
 coordinates into every tile.
 
-Written for exactly that job. On this pilot the automatic track locked onto a
-doorway and later leaked onto a black TV screen; both were re-seeded from boxes
-read off a sheet like this one.
+Written for exactly that job. On this pilot the automatic track locked onto
+static scenery twice; both shots were re-seeded from boxes read off a sheet like
+this one.
 
 Geometry is probed from the input rather than assumed, so the same script serves
 any working geometry.

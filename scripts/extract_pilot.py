@@ -4,7 +4,7 @@
 Picks automatically rather than taking the first few seconds. Scores every
 candidate window inside a single shot on:
   * motion energy          - the subject should actually move
-  * detail / texture       - visible clothing and edges, not a flat wall
+  * detail / texture       - visible attributes and edges, not a flat wall
   * viewpoint change       - rewards a moderate pose or angle change
   * subject presence       - uses the tracked mask when it exists
 and penalises windows that are nearly static or nearly empty.

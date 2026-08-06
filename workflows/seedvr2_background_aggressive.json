@@ -899,7 +899,7 @@
   "groups": [],
   "config": {},
   "extra": {
-    "note": "SeedVR2 3B (fp8_e4m3fn) full-frame restoration - background_aggressive. Reconstructs stronger plausible environmental detail. Expect more invented texture, and check signage and distant faces before trusting it."
+    "note": "SeedVR2 3B (fp8_e4m3fn) full-frame restoration - background_aggressive. Reconstructs stronger plausible environmental detail. Expect more invented texture, and check signage and distant anchors before trusting it."
   },
   "version": 0.4
 }

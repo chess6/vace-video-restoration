@@ -50,7 +50,7 @@ running conditional and unconditional passes every step.
 ### Options, in the order worth trying
 
 1. **Judge the pilot first.** Everything above is about throughput, not quality.
-   If the 1.3B model at 480p does not preserve identity convincingly, runtime is
+   If the 1.3B model at 480p does not preserve match convincingly, runtime is
    irrelevant. Run the pilot and fill in `reports/pilot_results.md`.
 
 2. **Drop steps to 15–20** and compare against the 25-step pilot on the same
@@ -68,7 +68,7 @@ running conditional and unconditional passes every step.
    14B/720p across eight GPUs, so "one 48 GB card is enough" is a hypothesis to
    test, not a plan to budget against. Rent by the hour, run
    `scripts/benchmark.py` and one pilot chunk first, and only then size the job.
-   Every figure in this document was measured on the 1.3B/480p profile on this
+   Every subject in this document was measured on the 1.3B/480p profile on this
    machine; none of it transfers to 14B/720p by arithmetic.
 
 4. **Only then** consider acceleration (CausVid / TeaCache / fp8). Deliberately
@@ -78,7 +78,7 @@ running conditional and unconditional passes every step.
 ### Reducing scope is also legitimate
 
 395 chunks assumes restoring the whole reference workload. If only the shots where the main
-figure is prominent actually matter, `intermediate/chunk_manifest.json` can be
+subject is prominent actually matter, `intermediate/chunk_manifest.json` can be
 filtered and the rest passed through untouched — `assemble.py` already fills
 unrestored ranges from the normalized source and preserves total duration.
 

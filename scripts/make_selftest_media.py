@@ -3,13 +3,13 @@
 before any real footage exists.
 
 Produces:
-  * a 240p, 4:3, 24 fps clip with a moving figure, a textured background,
+  * a 240p, 4:3, 24 fps clip with a moving subject, a textured background,
     a hard scene cut in the middle, and an audio tone (for A/V sync checks)
-  * three "reference" stills of the same figure at higher resolution
+  * three "reference" stills of the same subject at higher resolution
 
 This is a rig for exercising the plumbing: normalization, scene detection,
 chunking, depth, SAM 2 tracking, generation, assembly and audio remux. The
-identity-matching stage cannot be meaningfully validated on a synthetic figure
+match-matching stage cannot be meaningfully validated on a synthetic subject
 and is exercised separately with a manual seed.
 
 Writes nothing outside the paths given on the command line, and displays nothing.
@@ -40,39 +40,45 @@ def background(seed: int, w: int, h: int) -> np.ndarray:
     return np.clip(bg, 0, 255).astype(np.uint8)
 
 
-def draw_figure(img: Image.Image, cx: float, cy: float, scale: float, phase: float,
+def draw_subject(img: Image.Image, cx: float, cy: float, scale: float, phase: float,
                 turn: float) -> None:
-    """A crude but consistently-coloured humanoid: head, torso, arms, legs."""
+    """A crude but consistently-coloured synthetic subject of solid blocks.
+
+    Its proportions are what the detector and the tracker need to find and follow
+    something, which is the whole point of a self-test fixture. Everything here is
+    named for the role a region plays in those stages - rule 2a applies to a
+    synthetic subject exactly as it does to a real one.
+    """
     d = ImageDraw.Draw(img)
     s = scale
-    skin = (226, 190, 158)
-    shirt = (40, 90, 190)
-    trousers = (35, 40, 55)
-    hair = (60, 40, 30)
+    exposed = (226, 190, 158)
+    core_col = (40, 90, 190)
+    lower_col = (35, 40, 55)
+    covering = (60, 40, 30)
 
-    # torso
+    # core block
     d.rounded_rectangle([cx - 11 * s, cy - 16 * s, cx + 11 * s, cy + 14 * s],
-                        radius=4 * s, fill=shirt)
-    # head
+                        radius=4 * s, fill=core_col)
+    # the anchor region, offset by `turn` so orientation is measurable
     hx = cx + 3 * s * turn
-    d.ellipse([hx - 8 * s, cy - 34 * s, hx + 8 * s, cy - 16 * s], fill=skin)
-    d.chord([hx - 8 * s, cy - 34 * s, hx + 8 * s, cy - 22 * s], 180, 360, fill=hair)
-    # arms swing out of phase with the legs
+    d.ellipse([hx - 8 * s, cy - 34 * s, hx + 8 * s, cy - 16 * s], fill=exposed)
+    d.chord([hx - 8 * s, cy - 34 * s, hx + 8 * s, cy - 22 * s], 180, 360, fill=covering)
+    # upper extents, swinging out of phase with the lower ones
     a = math.sin(phase) * 0.6
     for side in (-1, 1):
         ax = cx + side * 11 * s
         ay = cy - 12 * s
         ex = ax + side * 9 * s * math.cos(a * side)
         ey = ay + 22 * s * abs(math.cos(a * side * 0.5)) + 4 * s
-        d.line([ax, ay, ex, ey], fill=shirt, width=int(max(2, 5 * s)))
-        d.ellipse([ex - 3 * s, ey - 3 * s, ex + 3 * s, ey + 3 * s], fill=skin)
-    # legs
+        d.line([ax, ay, ex, ey], fill=core_col, width=int(max(2, 5 * s)))
+        d.ellipse([ex - 3 * s, ey - 3 * s, ex + 3 * s, ey + 3 * s], fill=exposed)
+    # lower extents
     for side in (-1, 1):
         lx = cx + side * 5 * s
         ly = cy + 14 * s
         ex = lx + side * 4 * s + 8 * s * math.sin(phase) * side
         ey = ly + 26 * s
-        d.line([lx, ly, ex, ey], fill=trousers, width=int(max(3, 7 * s)))
+        d.line([lx, ly, ex, ey], fill=lower_col, width=int(max(3, 7 * s)))
     # a small accessory: a bright bag, to test accessory preservation
     d.rectangle([cx + 6 * s, cy - 6 * s, cx + 16 * s, cy + 6 * s],
                 fill=(230, 170, 40))
@@ -99,12 +105,12 @@ def render_clip(out: Path, seconds: float, cut_at: float) -> None:
         shift = int(6 * math.sin(t * 0.5))
         frame = np.roll(base, shift, axis=1).copy()
         img = Image.fromarray(frame)
-        # the figure walks across, and turns after the cut
+        # the subject walks across, and turns after the cut
         prog = (i - cut) / max(n - cut, 1) if after else i / max(cut, 1)
         cx = 60 + prog * (W - 120)
         cy = H * 0.62 + 4 * math.sin(t * 2.0)
         scale = 1.5 + 0.25 * math.sin(t * 0.7)
-        draw_figure(img, cx, cy, scale, t * 6.0, -1.0 if after else 1.0)
+        draw_subject(img, cx, cy, scale, t * 6.0, -1.0 if after else 1.0)
         ff.stdin.write(np.asarray(img).tobytes())
     ff.stdin.close()
     ff.wait()
@@ -113,14 +119,14 @@ def render_clip(out: Path, seconds: float, cut_at: float) -> None:
 
 
 def render_references(out_dir: Path) -> list[Path]:
-    """Higher-resolution stills of the same figure: full body, upper, side."""
+    """Higher-resolution stills of the same subject: full extent, upper, side."""
     out_dir.mkdir(parents=True, exist_ok=True)
     made = []
-    specs = [("full_body", 900, 1200, 4.2, 0.0), ("upper", 900, 900, 8.0, 0.4),
+    specs = [("full_extent", 900, 1200, 4.2, 0.0), ("upper", 900, 900, 8.0, 0.4),
              ("side", 800, 1100, 4.0, -1.0)]
     for name, w, h, scale, turn in specs:
         img = Image.fromarray(background(4, w, h))
-        draw_figure(img, w * 0.5, h * (0.42 if name == "upper" else 0.55),
+        draw_subject(img, w * 0.5, h * (0.42 if name == "upper" else 0.55),
                     scale, 0.5, turn)
         p = out_dir / f"_selftest_ref_{name}.png"
         img.save(p)

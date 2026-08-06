@@ -1,16 +1,16 @@
 # Third arm: the same LoRA at double strength.
 #
-# At strength 1.0 the LoRA moved identity inside the pipeline by nothing
-# measurable (0.1612 with, 0.1682 without, on a bank of held-out photographs)
+# At strength 1.0 the LoRA moved match inside the pipeline by nothing
+# measurable (0.1612 with, 0.1682 without, on a bank of held-out references)
 # while scoring 0.5167 on direct probes of the same weights. Two explanations
 # fit that, and they call for opposite next steps:
 #
 #   the LoRA's influence is too small to survive the protected path, or
-#   the protected path leaves no room for any identity prior at all - VACE
-#   regenerates 4.42% of the figure, tightly constrained by the control video
+#   the protected path leaves no room for any match prior at all - VACE
+#   regenerates 4.42% of the subject, tightly constrained by the control video
 #   and surrounded by plate.
 #
-# Doubling the only free parameter separates them. If identity still does not
+# Doubling the only free parameter separates them. If match still does not
 # move, the answer is structural and no amount of LoRA fixes it.
 extends: cloud_720p_1p3b_lora.yaml
 

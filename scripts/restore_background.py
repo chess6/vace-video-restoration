@@ -2,8 +2,8 @@
 """Phase 7b - full-frame background restoration with SeedVR2 3B.
 
 Runs BEFORE VACE and produces the plate the subject is later composited onto.
-It restores the whole frame - environment, props, distant figures, signage - and
-VACE then replaces only the masked main figure on top of it.
+It restores the whole frame - environment, props, distant subjects, signage - and
+VACE then replaces only the masked main subject on top of it.
 
 What this stage deliberately does NOT do: it never feeds anything structural.
 Scene cuts, chunk timing, depth, masks and subject tracking are all derived from

@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""Ask the user which figure is the target, in the least painful way possible.
+"""Ask the user which subject is the target, in the least painful way possible.
 
-When no face is resolvable in a shot there is no automatic answer, and guessing
-is what put a stranger through a full generation. This does not guess. It writes
-a numbered contact sheet of every detected person and prints the box for each
+When no anchor is resolvable in a shot there is no automatic answer, and guessing
+is what put a non-target through a full generation. This does not guess. It writes
+a numbered contact sheet of every detected candidate and prints the box for each
 number, so the answer can be given as "candidate 4" instead of by reading pixel
 coordinates off a still.
 
@@ -34,11 +34,11 @@ COLOURS = [(255, 64, 64), (64, 220, 64), (80, 160, 255), (255, 200, 40),
 def suppress(boxes, iou_thresh=0.55, max_frame_cover=0.80):
     """Thin near-duplicate boxes down to a menu a human can actually use.
 
-    At a low detection threshold one figure produces a dozen nested boxes, and
+    At a low detection threshold one subject produces a dozen nested boxes, and
     thirty options is not a choice. Highest score wins each cluster.
 
     Boxes covering most of the frame are dropped: at that size the detector has
-    latched onto the scene rather than a person, and they crowd out the real
+    latched onto the scene rather than a candidate, and they crowd out the real
     candidates. Nothing else is filtered - an unusual pose is exactly what we
     are looking for here, so low scores stay in.
     """
@@ -66,7 +66,7 @@ def main() -> int:
                     help="How many frames across the shot to show")
     ap.add_argument("--max-candidates", type=int, default=6)
     ap.add_argument("--detect-threshold", type=float, default=None,
-                    help="Lower it to surface people the default "
+                    help="Lower it to surface candidates the default "
                          "threshold misses (degraded sources score low)")
     ap.add_argument("--scale", type=float, default=1.5,
                     help="Enlarge the sheet; the source is low resolution")
@@ -99,7 +99,7 @@ def main() -> int:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         kw = ({} if args.detect_threshold is None
               else {"threshold": args.detect_threshold})
-        boxes = models.detect_people(Image.fromarray(rgb), **kw)
+        boxes = models.detect_candidates(Image.fromarray(rgb), **kw)
         H0, W0 = canvas_shape = frame.shape[:2]
         boxes = [b for b in boxes
                  if (b[2] - b[0]) * (b[3] - b[1]) <= 0.80 * W0 * H0]
@@ -117,9 +117,9 @@ def main() -> int:
                           "det_score": round(float(bx[4]), 3),
                           "height_frac": round((y1 - y0) / canvas.shape[0], 3),
                           "width_frac": round((x1 - x0) / canvas.shape[1], 3),
-                          # Wider than tall usually means a reclining figure.
-                          # Worth showing, because the detector's own score is
-                          # biased against exactly that pose.
+                          # Wider than tall means the subject's dominant extent
+                          # is horizontal. Worth showing, because the detector's
+                          # own score is biased against a non-upright pose.
                           "aspect": round((x1 - x0) / max(1, y1 - y0), 2)})
             idx += 1
         cv2.putText(canvas, f"frame {want - a}", (8, canvas.shape[0] - 10),

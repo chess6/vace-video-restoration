@@ -1,40 +1,44 @@
 #!/usr/bin/env python
-"""Phase 5b - identity-only external conditioning + source-derived garment.
+"""Phase 5b - match-only external conditioning + source-derived attribute.
 
-The task here is to RESTORE the garment that is already in the footage, not to
-infer a garment from photographs taken elsewhere. Those two things were being
-conflated, and that is why clothing colours were invented.
+The task here is to RESTORE the attribute that is already in the footage, not to
+infer an attribute from references captured elsewhere. Those two things were being
+conflated, and that is why attribute colours were invented.
 
 Strict division of authority:
 
-  * External photographs condition IDENTITY ONLY - face, hair, exposed skin,
-    body appearance. Their clothing is segmented out and replaced with neutral
-    grey before the panel is drawn, so it cannot reach the model at all. A faint
-    ghost of the wrong jacket is still a jacket to a generative model.
-  * THIS SOURCE INTERVAL is the sole ground truth for the garment: class,
+  * External references condition MATCH ONLY - the anchor region and the exposed
+    regions around it. Their attributes are segmented out and replaced with neutral
+    grey before the panel is drawn, so they cannot reach the model at all. A faint
+    ghost of the wrong attribute is still an attribute to a generative model.
+  * THIS SOURCE INTERVAL is the sole ground truth for the attribute: class,
     silhouette, boundaries, colours, patterns, accessories, folds and how they
     move. It is low resolution, and that is fine - the job is to preserve its
     low-frequency colour and structure while generating only the missing
     high-frequency texture.
 
-Which photographs become panels is decided by IDENTITY EVIDENCE ALONE:
-consensus face agreement across the reference set (near-duplicates collapsed
-first, so repeated copies cannot vote twice), how many pixels the face occupies,
-and - for the second panel - how far the head is actually turned, measured from
-face landmarks. Never by garment colour, and never by full-image similarity,
+Which references become panels is decided by MATCH EVIDENCE ALONE:
+consensus anchor agreement across the reference set (near-duplicates collapsed
+first, so repeated copies cannot vote twice), how many pixels the anchor occupies,
+and - for the second panel - how far the anchor is actually turned, measured from
+its keypoints. Never by attribute colour, and never by full-image similarity,
 which responds to background and framing rather than to viewpoint.
 
-Garment distance is still measured and recorded, purely as evidence that the
-photographs show other clothes; it is a diagnostic, never a switch, and the
-source remains the garment authority whatever it says.
+Attribute distance is still measured and recorded, purely as evidence that the
+references show other attributes; it is a diagnostic, never a switch, and the
+source remains the attribute authority whatever it says.
 
 Appearance clustering still runs and is still recorded, but it no longer confines
-the choice. Its job was to stop two outfits being combined in one conditioning
-image, and there is no longer an outfit in an external panel to conflict - so
+the choice. Its job was to stop two appearances being combined in one conditioning
+image, and there is no longer an appearance in an external panel to conflict - so
 restricting panels to a single cluster would only discard viewing angles.
 
-Clustering is automatic (CLIP appearance embeddings + garment histograms), and
-so is garment parsing (SegFormer). No manual labelling anywhere.
+Clustering is automatic (CLIP appearance embeddings + attribute histograms), and
+so is attribute parsing (SegFormer). No manual labelling anywhere.
+
+The parser's label strings below are its own, read from the model card's id2label
+and indexed by string, so they stay verbatim (the dependency floor of rule 2a).
+Everything built ON them - set names, record keys, prose - uses role words.
 
 720p references are treated as adequate and are NOT upscaled to reach 1080p:
 resampling adds no information and softens the very detail they are here for.
@@ -59,85 +63,88 @@ from common import (  # noqa: E402
 SEGFORMER_ID = "mattmdjaga/segformer_b2_clothes"
 SEGFORMER_REV = "584abc1e1d26"
 
-# SegFormer clothes label map (from the model card's id2label).
+# SegFormer attributes label map (from the model card's id2label).
 LBL = {0: "background", 1: "hat", 2: "hair", 3: "sunglasses", 4: "upper",
        5: "skirt", 6: "pants", 7: "dress", 8: "belt", 9: "left_shoe",
        10: "right_shoe", 11: "face", 12: "left_leg", 13: "right_leg",
        14: "left_arm", 15: "right_arm", 16: "bag", 17: "scarf"}
-GARMENT = {"hat", "upper", "skirt", "pants", "dress", "belt", "left_shoe",
+ATTRIBUTE = {"hat", "upper", "skirt", "pants", "dress", "belt", "left_shoe",
            "right_shoe", "bag", "scarf"}
-SKIN = {"face", "left_leg", "right_leg", "left_arm", "right_arm"}
-# What an EXTERNAL photograph is allowed to condition.
+EXPOSED = {"face", "left_leg", "right_leg", "left_arm", "right_arm"}
+# What an EXTERNAL reference is allowed to condition.
 #
-# Narrowed to head only. Arms and legs were in this set on the reasoning that
-# bare skin is "identity", but they are not: how much arm or leg is visible is a
-# fact about what the person is WEARING that day. A reference showing bare arms
-# tells the model to produce bare arms, and if the source has sleeves it has
-# just been instructed to remove them. Same for legs and hemlines. Sleeve and
-# torso coverage belong to the source, exactly like the garment itself.
+# Narrowed to the anchor region only. The peripheral extents were in this set on
+# the reasoning that an exposed region is "match", but they are not: how much of a
+# peripheral extent is visible is a fact about the attribute the candidate carries
+# that day. A reference showing more of one instructs the model to expose more, and
+# if the source covers it, the model has just been told to uncover it. Coverage
+# belongs to the source, exactly like the attribute itself.
 #
-# Hats, sunglasses and scarves stay out too - accessories of another day.
-IDENTITY_ONLY = {"hair", "face"}
+# Accessory classes stay out too - they are attributes of another day.
+MATCH_ONLY = {"hair", "face"}
 
-# Head classes, used to ask what the SOURCE actually exposes before any external
-# face is allowed to condition anything. A face covering in the source is part of
-# what the person is wearing; an external photograph showing an uncovered face
-# must never be read as permission to remove it.
-HEAD = {"hair", "face", "hat", "sunglasses", "scarf"}
+# The anchor region's classes, used to ask what the SOURCE actually exposes before
+# any external anchor is allowed to condition anything. A covering in the source is
+# part of the attribute the candidate presents; an external reference showing it
+# uncovered must never be read as permission to remove it.
+ANCHOR_REGION = {"hair", "face", "hat", "sunglasses", "scarf"}
 COVERING = {"hat", "sunglasses", "scarf"}
 
 
-def identity_regions(labels: np.ndarray, allowed: set | None = None,
+def match_regions(labels: np.ndarray, allowed: set | None = None,
                      keep: set | None = None) -> np.ndarray:
-    """Boolean mask of the pixels of an external photo that may be shown.
+    """Boolean mask of the pixels of an external reference that may be shown.
 
-    `allowed` narrows IDENTITY_ONLY further for one shot. It is how a covered
-    source face is protected: with "face" removed, an external photograph of an
-    uncovered face contributes hair and nothing else, so it cannot instruct the
-    model to take the covering off. It can only ever narrow - intersecting is
-    the safety property, so a caller passing a wider set gets the narrow one.
+    `allowed` narrows MATCH_ONLY further for one shot. It is how a covered
+    source anchor is protected: with the anchor class removed, an external
+    reference showing it uncovered contributes the surrounding class and nothing
+    else, so it cannot instruct the model to take the covering off. It can only
+    ever narrow - intersecting is the safety property, so a caller passing a wider
+    set gets the narrow one.
 
     `keep` REPLACES the set instead of narrowing it, and exists for callers
-    outside the reference pack that mean something different by identity -
-    grey_candidate_garments.py keeps skin as well as head, on the user's
-    instruction, for a transfer path where nothing regenerates the garment.
-    Anything on the pack's own path passes `allowed` and cannot widen anything.
+    outside the reference pack that mean something different by match -
+    grey_candidate_attributes.py keeps the exposed regions as well as the anchor
+    region, on the user's instruction, for a transfer path where nothing
+    regenerates the attribute. Anything on the pack's own path passes `allowed`
+    and cannot widen anything.
     """
     if keep is not None:
         names = set(keep)
     else:
-        names = IDENTITY_ONLY if allowed is None else (set(allowed) & IDENTITY_ONLY)
+        names = MATCH_ONLY if allowed is None else (set(allowed) & MATCH_ONLY)
     ids = [i for i, n in LBL.items() if n in names]
     return np.isin(labels, ids)
 
 
-def mask_to_identity(im, labels, feather: int = 3, allowed: set | None = None,
+def mask_to_match(im, labels, feather: int = 3, allowed: set | None = None,
                      keep: set | None = None):
-    """Blank everything that is not identity in an external reference.
+    """Blank everything that is not match in an external reference.
 
-    Garments, accessories and background are removed rather than dimmed: a faint
-    ghost of the wrong jacket is still a jacket as far as the model is concerned.
+    Attributes, accessories and background are removed rather than dimmed: a faint
+    ghost of the wrong attribute is still an attribute as far as the model is
+    concerned.
     A few pixels of feather stop the cut-out edge from reading as a hard graphic
     shape, which would itself become something to reproduce.
     """
     from PIL import Image
     arr = np.asarray(im).astype(np.float32)
-    hard = identity_regions(labels, allowed, keep)
+    hard = match_regions(labels, allowed, keep)
     m = hard.astype(np.float32)
     if feather > 0:
         import cv2
         r = feather * 2 + 1
         # Erode first, blur, then re-multiply by the hard mask. The ramp then
-        # lies entirely INSIDE the identity region and no pixel outside it keeps
+        # lies entirely INSIDE the match region and no pixel outside it keeps
         # any of its original value.
         #
         # A plain blur ramps OUTWARDS. Measured on a real reference, that let up
-        # to 83/255 of the true pixel survive in a ring around the head - and the
-        # pixels immediately around a head are neck and shoulders. On a
-        # photograph where the subject is bare-chested and the footage shows
-        # them wearing a top, that ring is a hint to take it off. Same
-        # one-sided reasoning as the occluder boundary in composite_subject.py:
-        # the ramp may only ever give ground inwards.
+        # to 83/255 of the true pixel survive in a ring around the anchor region -
+        # and what lies immediately around it is attribute-bearing. On a reference
+        # where that ring is uncovered and the footage shows it covered, the ring
+        # is a hint to uncover it. Same one-sided reasoning as the occluder
+        # boundary in composite_subject.py: the ramp may only ever give ground
+        # inwards.
         k = np.ones((2 * feather + 1,) * 2, np.uint8)
         inner = cv2.erode(hard.astype(np.uint8), k).astype(np.float32)
         m = cv2.GaussianBlur(inner, (r, r), 0) * m
@@ -147,11 +154,11 @@ def mask_to_identity(im, labels, feather: int = 3, allowed: set | None = None,
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), float(m.mean())
 
 
-def build_panel_images(face_panel: dict, source_crop, alt_panel: dict | None,
+def build_panel_images(anchor_panel: dict, source_crop, alt_panel: dict | None,
                        allowed: set | None = None):
     """The panel images, in sheet order, with the authority split enforced here.
 
-    Externals in, identity-only out; the source crop passes through untouched.
+    Externals in, match-only out; the source crop passes through untouched.
     Keeping this in one function means the rule is one testable statement rather
     than something a future edit to the rendering loop can quietly break.
 
@@ -159,12 +166,12 @@ def build_panel_images(face_panel: dict, source_crop, alt_panel: dict | None,
     source panel, which is never masked.
     """
     from PIL import Image
-    face_img, face_keep = mask_to_identity(face_panel["image"],
-                                           face_panel["labels"], allowed=allowed)
-    imgs = [face_img, Image.fromarray(np.asarray(source_crop))]
-    keeps: list[float | None] = [face_keep, None]
+    anchor_img, anchor_keep = mask_to_match(anchor_panel["image"],
+                                           anchor_panel["labels"], allowed=allowed)
+    imgs = [anchor_img, Image.fromarray(np.asarray(source_crop))]
+    keeps: list[float | None] = [anchor_keep, None]
     if alt_panel is not None:
-        alt_img, alt_keep = mask_to_identity(alt_panel["image"],
+        alt_img, alt_keep = mask_to_match(alt_panel["image"],
                                              alt_panel["labels"], allowed=allowed)
         imgs.append(alt_img)
         keeps.append(alt_keep)
@@ -172,14 +179,14 @@ def build_panel_images(face_panel: dict, source_crop, alt_panel: dict | None,
 
 
 class Parser:
-    """SegFormer clothes parsing, loaded once."""
+    """SegFormer attributes parsing, loaded once."""
 
     def __init__(self, log):
         import torch
         from transformers import SegformerImageProcessor, AutoModelForSemanticSegmentation
         self.torch = torch
         self.dev = "cuda" if torch.cuda.is_available() else "cpu"
-        log.info("Loading clothing parser %s", SEGFORMER_ID)
+        log.info("Loading attributes parser %s", SEGFORMER_ID)
         self.proc = SegformerImageProcessor.from_pretrained(
             SEGFORMER_ID, revision=SEGFORMER_REV)
         self.model = AutoModelForSemanticSegmentation.from_pretrained(
@@ -192,11 +199,11 @@ class Parser:
     def parse_prob(self, pil):
         """(labels, confidence) - the softmax probability of the winning class.
 
-        Confidence is what makes failing closed possible. An argmax alone says
-        "face" just as firmly at 0.31 as at 0.99, and a garment region the parser
+        Confidence is what makes failing closed possible. An argmax alone names a
+        class just as firmly at 0.31 as at 0.99, and an attribute region the parser
         is unsure about looks exactly like an exposed one. Regenerating only
-        where the parser is certain is the difference between improving a face
-        and erasing a sleeve.
+        where the parser is certain is the difference between improving the anchor
+        and erasing part of an attribute.
         """
         import torch
         with torch.inference_mode():
@@ -211,17 +218,17 @@ class Parser:
 
 
 def palette(rgb: np.ndarray, labels: np.ndarray) -> dict:
-    """Median Lab colour per garment class, plus its pixel share.
+    """Median Lab colour per attribute class, plus its pixel share.
 
     Median rather than mean: a few blown-out highlights or a dark fold should not
-    move the recorded colour of a garment.
+    move the recorded colour of an attribute.
     """
     import cv2
     lab = cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
     out = {}
     total = labels.size
     for idx, name in LBL.items():
-        if name not in GARMENT:
+        if name not in ATTRIBUTE:
             continue
         m = labels == idx
         n = int(m.sum())
@@ -239,13 +246,13 @@ def delta_e(a: list, b: list) -> float:
     return float(np.sqrt(sum((x - y) ** 2 for x, y in zip(a, b))))
 
 
-def source_outfit(work: Path, mask_video: Path, parser: Parser, n_probe: int,
+def source_appearance(work: Path, mask_video: Path, parser: Parser, n_probe: int,
                   log) -> dict:
-    """Learn the CURRENT outfit from this interval: the only correct authority.
+    """Learn the CURRENT appearance from this interval: the only correct authority.
 
-    Picks the frames where the subject is largest and sharpest, parses garments
+    Picks the frames where the subject is largest and sharpest, parses attributes
     on each, and keeps a temporally smoothed palette plus the single best frame
-    as an exact-outfit panel.
+    as an exact-appearance panel.
     """
     import cv2
     from PIL import Image
@@ -260,7 +267,7 @@ def source_outfit(work: Path, mask_video: Path, parser: Parser, n_probe: int,
         masks.append(cv2.cvtColor(m, cv2.COLOR_BGR2GRAY) > 127)
     cap.release(); mcap.release()
     if not frames:
-        raise RuntimeError("no frames to learn the outfit from")
+        raise RuntimeError("no frames to learn the appearance from")
 
     score = []
     for f, m in zip(frames, masks):
@@ -290,10 +297,10 @@ def source_outfit(work: Path, mask_video: Path, parser: Parser, n_probe: int,
             best = {"frame": int(i), "crop": crop, "labels": lab, "palette": pal}
 
     if not per_frame:
-        raise RuntimeError("clothing parsing found no garments in the source")
+        raise RuntimeError("attributes parsing found no attributes in the source")
 
     # Temporal smoothing: median across probe frames, and the spread as a
-    # stability measure. A garment whose colour swings between frames is not a
+    # stability measure. An attribute whose colour swings between frames is not a
     # reliable constraint and is reported as such.
     names = sorted({k for p in per_frame for k in p})
     smoothed = {}
@@ -307,7 +314,7 @@ def source_outfit(work: Path, mask_video: Path, parser: Parser, n_probe: int,
         smoothed[name] = {"lab": med, "temporal_deltaE": round(spread, 2),
                           "frames_seen": len(vals),
                           "stable": bool(spread < 8.0)}
-    log.info("Source outfit (%d probe frames): %s", len(per_frame),
+    log.info("Source appearance (%d probe frames): %s", len(per_frame),
              ", ".join(f"{k}(dE{v['temporal_deltaE']:.1f}"
                        f"{'' if v['stable'] else ' UNSTABLE'})"
                        for k, v in smoothed.items()) or "nothing parsed")
@@ -316,21 +323,21 @@ def source_outfit(work: Path, mask_video: Path, parser: Parser, n_probe: int,
 
 def cluster_references(files: list[Path], parser: Parser, models, log,
                        thresh: float, verified: dict | None = None) -> list[dict]:
-    """Group the external photographs by appearance, and gather everything the
-    panel choice needs: garment palette, CLIP embedding, face embedding, size.
+    """Group the external references by appearance, and gather everything the
+    panel choice needs: attribute palette, CLIP embedding, anchor embedding, size.
 
-    The grouping is now diagnostic - see the module docstring. Identity is a
-    separate question, decided in score_identity() from these same embeddings.
+    The grouping is now diagnostic - see the module docstring. Match is a
+    separate question, decided in score_match() from these same embeddings.
 
     `verified` maps a resolved path to the target instance that
-    identity.resolve_targets already agreed on. It is not optional in practice:
-    without it this function called face_detail(), which returns the LARGEST
-    face in the photograph, silently discarding the verified target. In an image
-    where the subject is not the biggest face - a group shot, someone nearer the
-    camera - the panel choice, the yaw and the face fraction would then all
-    describe the wrong person, in a function whose whole job is to prepare
-    identity conditioning. main() filters `files` to verified images, so only
-    WHICH face was taken was wrong, not which files; that is quiet enough to
+    reference_match.resolve_targets already agreed on. It is not optional in practice:
+    without it this function called anchor_detail(), which returns the LARGEST
+    anchor in the reference, silently discarding the verified target. In an image
+    where the subject is not the biggest anchor - a group shot, a non-target nearer
+    the camera - the panel choice, the orientation and the anchor fraction would
+    then all describe the wrong candidate, in a function whose whole job is to prepare
+    match conditioning. main() filters `files` to verified images, so only
+    WHICH anchor was taken was wrong, not which files; that is quiet enough to
     have survived this long.
     """
     from PIL import Image, ImageOps
@@ -347,26 +354,26 @@ def cluster_references(files: list[Path], parser: Parser, models, log,
         lab = parser.parse(im)
         pal = palette(np.asarray(im), lab)
         emb = models.clip_embed([im])[0]
-        # A SECOND embedding, of the identity-masked image. The full-frame one
-        # above is what clusters outfits; it is dominated by background, framing
-        # and clothing, so it must never be read as "a different viewing angle".
-        # This one has all of that removed and describes the person only.
-        id_emb = models.clip_embed([mask_to_identity(im, lab, feather=0)[0]])[0]
+        # A SECOND embedding, of the match-masked image. The full-frame one
+        # above is what clusters appearances; it is dominated by background, framing
+        # and attributes, so it must never be read as "a different viewing angle".
+        # This one has all of that removed and describes the candidate only.
+        id_emb = models.clip_embed([mask_to_match(im, lab, feather=0)[0]])[0]
         v = (verified or {}).get(str(f)) or (verified or {}).get(f)
         if v is not None:
-            face, kps = v["face"], v.get("kps")
-            face_frac = float(v.get("face_frac") or 0.0)
+            anchor, kps = v["anchor"], v.get("keypoints")
+            anchor_frac = float(v.get("anchor_frac") or 0.0)
         else:
             log.warning("%-34s no verified target instance; falling back to the "
-                        "largest face", f.name)
-            face, kps, face_frac = face_detail(models, im)
+                        "largest anchor", f.name)
+            anchor, kps, anchor_frac = anchor_detail(models, im)
         items.append({"file": f, "image": im, "labels": lab, "palette": pal,
-                      "clip": emb, "clip_identity": id_emb, "face": face,
-                      "yaw": face_yaw(kps), "face_frac": face_frac,
+                      "clip": emb, "clip_match": id_emb, "anchor": anchor,
+                      "orientation": anchor_orientation(kps), "anchor_frac": anchor_frac,
                       "size": list(im.size)})
 
-    # Appearance clustering: garment palette distance first (that is what an
-    # "outfit" is), CLIP distance as the tiebreak for pose/framing differences.
+    # Appearance clustering: attribute palette distance first (that is what an
+    # "appearance" is), CLIP distance as the tiebreak for pose/framing differences.
     groups: list[dict] = []
     for it in items:
         placed = False
@@ -375,11 +382,11 @@ def cluster_references(files: list[Path], parser: Parser, models, log,
             if shared:
                 d = np.mean([delta_e(it["palette"][k]["lab"],
                                      g["palette"][k]["lab"]) for k in shared])
-                same_outfit = d < thresh
+                same_appearance = d < thresh
             else:
-                same_outfit = False
+                same_appearance = False
             appearance = float(np.dot(it["clip"], g["members"][0]["clip"]))
-            if same_outfit and appearance > 0.6:
+            if same_appearance and appearance > 0.6:
                 g["members"].append(it)
                 for k, v in it["palette"].items():
                     g["palette"].setdefault(k, v)
@@ -395,86 +402,87 @@ def cluster_references(files: list[Path], parser: Parser, models, log,
     return groups
 
 
-def face_detail(models, pil):
-    """(embedding, 5-point landmarks, face area fraction) for the largest face.
+def anchor_detail(models, pil):
+    """(embedding, 5-point keypoints, anchor area fraction) for the largest anchor.
 
-    Models.face_embed returns the bounding box, which says nothing about which
-    way the head is turned. The landmarks do.
+    Models.anchor_embed returns the bounding box, which says nothing about which
+    way the anchor is turned. The keypoints do.
     """
-    app = models.face()
+    app = models.anchor()
     if app is None:
         return None, None, 0.0
     import cv2
     bgr = cv2.cvtColor(np.asarray(pil.convert("RGB")), cv2.COLOR_RGB2BGR)
-    faces = app.get(bgr)
-    if not faces:
+    anchors = app.get(bgr)
+    if not anchors:
         return None, None, 0.0
-    f = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
+    f = max(anchors, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
     fa = ((f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])) / (pil.width * pil.height)
     return (np.asarray(f.normed_embedding, dtype=np.float32),
             getattr(f, "kps", None), float(fa))
 
 
-def face_yaw(kps) -> float | None:
-    """Signed yaw proxy in [-1, 1] from the 5-point face landmarks.
+def anchor_orientation(kps) -> float | None:
+    """Signed turn proxy in [-1, 1] from the detector's 5-point anchor keypoints.
 
-    The nose sits midway between the eyes on a head-on view and slides towards
-    the near eye as the head turns, so its offset from the eye midpoint, divided
-    by the interocular distance, tracks yaw. Scale-free and roll-tolerant,
-    because both terms rotate together.
+    Keypoints 0 and 1 are a symmetric pair and 2 lies on the axis of symmetry
+    between them. Square-on, 2 sits at their midpoint; as the anchor turns it
+    slides towards the nearer of the pair. Its offset from that midpoint, divided
+    by the span of the pair, therefore tracks the turn. Scale-free and tolerant of
+    in-plane rotation, because both terms rotate together.
 
-    This is a real geometric measurement of head orientation. It replaces a
-    full-image CLIP distance, which was being read as "a different angle" when
-    what it actually responds to is background, framing, lighting and clothing -
-    a photograph of the same pose in a different room scored as a new viewpoint.
+    This is a real geometric measurement. It replaces a full-image CLIP distance,
+    which was being read as "a different angle" when what it actually responds to
+    is background, framing, lighting and attributes - a reference at the same angle
+    in a different setting scored as a new viewpoint.
     """
     if kps is None or len(kps) < 3:
         return None
-    le, re, nose = np.asarray(kps[0]), np.asarray(kps[1]), np.asarray(kps[2])
-    axis = re - le
+    a, b, mid_pt = np.asarray(kps[0]), np.asarray(kps[1]), np.asarray(kps[2])
+    axis = b - a
     d = float(np.hypot(*axis))
     if d < 1e-3:
         return None
-    mid = (le + re) / 2.0
-    # Project nose-minus-midpoint onto the eye axis, so head roll does not leak in.
-    t = float(np.dot(nose - mid, axis) / (d * d))
+    mid = (a + b) / 2.0
+    # Project onto the pair's axis, so in-plane rotation does not leak in.
+    t = float(np.dot(mid_pt - mid, axis) / (d * d))
     return float(np.clip(t * 2.0, -1.0, 1.0))
 
 
-def consensus_identity(items: list[dict], same_face: float = 0.35,
+def consensus_match(items: list[dict], same_anchor: float = 0.35,
                        duplicate: float = 0.92) -> dict:
-    """Which references are agreed to show one person, by consensus.
+    """Which references are agreed to show one candidate, by consensus.
 
     Taking the single maximum similarity is not verification: it asks only
-    whether SOME other photograph agrees, so two copies of the wrong person
+    whether SOME other reference agrees, so two copies of the wrong candidate
     vouch for each other and both score perfectly. Near-duplicates have to go
     first, then agreement has to come from the group rather than from one
     neighbour.
 
       1. collapse near-duplicates (>= `duplicate`) to one representative, so
          repeated copies cannot vote repeatedly
-      2. link representatives that match at all (>= `same_face`) and take the
-         largest connected group - the consensus identity
+      2. link representatives that match at all (>= `same_anchor`) and take the
+         largest connected group - the consensus match
       3. score each reference by its MEDIAN similarity to the other members of
          that group, which a single outlier cannot lift
 
     Anything outside the consensus group scores zero and is never drawn: an
-    unverified photograph would be conditioning the model on a stranger's face.
+    unverified reference would be conditioning the model on a non-target's anchor.
     """
-    faces = [m for m in items if m["face"] is not None]
+    anchors = [m for m in items if m["anchor"] is not None]
     for m in items:
-        m["identity_group"] = None
+        m["match_group"] = None
         m["agreement"] = 0.0
         m["duplicate_of"] = None
-    if len(faces) < 2:
-        return {"members": len(faces), "group": [], "duplicates": 0,
-                "note": "too few detectable faces to reach consensus"}
+    if len(anchors) < 2:
+        return {"members": len(anchors), "group": [], "duplicates": 0,
+                "note": "too few detectable anchors to reach consensus"}
 
-    E = np.stack([m["face"] for m in faces])
+    E = np.stack([m["anchor"] for m in anchors])
     S = E @ E.T
 
     # 1. near-duplicate collapse (union-find over the duplicate threshold)
-    parent = list(range(len(faces)))
+    parent = list(range(len(anchors)))
 
     def find(i):
         while parent[i] != i:
@@ -482,26 +490,26 @@ def consensus_identity(items: list[dict], same_face: float = 0.35,
             i = parent[i]
         return i
 
-    for i in range(len(faces)):
-        for j in range(i + 1, len(faces)):
+    for i in range(len(anchors)):
+        for j in range(i + 1, len(anchors)):
             if S[i, j] >= duplicate:
                 parent[find(i)] = find(j)
     reps: dict[int, int] = {}
-    for i in range(len(faces)):
+    for i in range(len(anchors)):
         reps.setdefault(find(i), i)
     rep_idx = sorted(reps.values())
-    n_dup = len(faces) - len(rep_idx)
-    for i in range(len(faces)):
+    n_dup = len(anchors) - len(rep_idx)
+    for i in range(len(anchors)):
         r = reps[find(i)]
         if r != i:
-            faces[i]["duplicate_of"] = faces[r]["file"].name
+            anchors[i]["duplicate_of"] = anchors[r]["file"].name
 
     # 2. largest connected group among representatives
     adj = {i: set() for i in rep_idx}
     for a in range(len(rep_idx)):
         for b in range(a + 1, len(rep_idx)):
             i, j = rep_idx[a], rep_idx[b]
-            if S[i, j] >= same_face:
+            if S[i, j] >= same_anchor:
                 adj[i].add(j)
                 adj[j].add(i)
     seen, best_group = set(), []
@@ -519,58 +527,59 @@ def consensus_identity(items: list[dict], same_face: float = 0.35,
         if len(comp) > len(best_group):
             best_group = comp
     group = set(best_group)
-    # A duplicate of a group member is in the group too - it is the same photo.
-    members = [i for i in range(len(faces)) if reps[find(i)] in group]
+    # A duplicate of a group member is in the group too - it is the same image.
+    members = [i for i in range(len(anchors)) if reps[find(i)] in group]
 
     # 3. median agreement with the OTHER representatives of that group
     for i in members:
         others = [j for j in best_group if reps[find(j)] != reps[find(i)]]
-        faces[i]["agreement"] = (round(float(np.median(S[i, others])), 4)
+        anchors[i]["agreement"] = (round(float(np.median(S[i, others])), 4)
                                  if others else 0.0)
-        faces[i]["identity_group"] = "consensus"
+        anchors[i]["match_group"] = "consensus"
     return {"members": len(members), "representatives": len(best_group),
-            "duplicates": n_dup, "candidates": len(faces),
-            "same_face_threshold": same_face, "duplicate_threshold": duplicate}
+            "duplicates": n_dup, "candidates": len(anchors),
+            "same_anchor_threshold": same_anchor, "duplicate_threshold": duplicate}
 
 
-def score_identity(items: list[dict]) -> None:
-    """Rate each photograph on how well it serves IDENTITY conditioning, in place.
+def score_match(items: list[dict]) -> None:
+    """Rate each reference on how well it serves MATCH conditioning, in place.
 
-    Deliberately blind to garment colour. Once clothing is segmented out of the
-    external panels, which outfit a photograph happens to show says nothing about
-    how well it depicts the face, and letting it decide would reintroduce exactly
+    Deliberately blind to attribute colour. Once attributes are segmented out of the
+    external panels, which appearance a reference happens to show says nothing about
+    how well it depicts the anchor, and letting it decide would reintroduce exactly
     the coupling these packs exist to break.
 
-    Agreement comes from consensus_identity(), which is neither a self-comparison
-    nor a single maximum: near-duplicates are collapsed first, then a photograph
+    Agreement comes from consensus_match(), which is neither a self-comparison
+    nor a single maximum: near-duplicates are collapsed first, then a reference
     is scored by its MEDIAN similarity to the rest of the agreed group. Both of
     the shortcuts it replaces gave a perfect score to the wrong answer - scoring
-    against a bank built from these same photographs returned 1.000 for anything
-    already in it, and taking the maximum let two copies of a stranger vouch for
+    against a bank built from these same references returned 1.000 for anything
+    already in it, and taking the maximum let two copies of a non-target vouch for
     each other.
 
-      agreement  consensus face similarity: is this the right person
-      face_res   how many pixels the face occupies; a correct match at 20 px
+      agreement  consensus anchor similarity: is this the right candidate
+      anchor_res   how many pixels the anchor occupies; a correct match at 20 px
                  carries no detail worth transferring
 
-    Weighted in that order, because a confident wrong identity is the worst
-    outcome available. A photograph with no detectable face, or one outside the
-    consensus group, scores zero: it may well be the right person, but nothing
+    Weighted in that order, because a confident wrong match is the worst
+    outcome available. A reference with no detectable anchor, or one outside the
+    consensus group, scores zero: it may well be the right candidate, but nothing
     here shows that it is.
     """
     for m in items:
         w, h = m["size"]
-        # sqrt -> a face side length; ~200 px is already ample for conditioning,
-        # so the score saturates there instead of rewarding ever-larger portraits.
-        px = float(m["face_frac"] or 0.0) * w * h
+        # sqrt -> an anchor side length; ~200 px is already ample for conditioning,
+        # so the score saturates there instead of rewarding ever-tighter framing.
+        px = float(m["anchor_frac"] or 0.0) * w * h
         res = float(np.clip(np.sqrt(px) / 200.0, 0.0, 1.0))
         agree = float(m.get("agreement") or 0.0)
-        m["identity"] = {"agreement": round(agree, 4),
-                         "face_resolution": round(res, 4),
-                         "face_pixels": int(px),
-                         "yaw": (round(m["yaw"], 3) if m.get("yaw") is not None
-                                 else None),
-                         "verified": bool(m.get("identity_group") == "consensus"),
+        m["match"] = {"agreement": round(agree, 4),
+                         "anchor_resolution": round(res, 4),
+                         "anchor_pixels": int(px),
+                         "orientation": (round(m["orientation"], 3)
+                                         if m.get("orientation") is not None
+                                         else None),
+                         "verified": bool(m.get("match_group") == "consensus"),
                          "duplicate_of": m.get("duplicate_of"),
                          "score": round(0.7 * agree + 0.3 * res, 4)}
 
@@ -582,9 +591,9 @@ def main() -> int:
     ap.add_argument("--shot", nargs="*", default=None)
     ap.add_argument("--pilot", action="store_true")
     ap.add_argument("--probe-frames", type=int, default=8)
-    ap.add_argument("--outfit-deltae", type=float, default=18.0,
-                    help="Garment colour distance above which two photographs "
-                         "are treated as different outfits")
+    ap.add_argument("--appearance-deltae", type=float, default=18.0,
+                    help="Attribute colour distance above which two references "
+                         "are treated as different appearances")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -593,9 +602,9 @@ def main() -> int:
     man = load_manifest()
     import track_subject as T
     models = T.Models(log)
-    # No identity bank here on purpose: it is built from these same
-    # photographs, so scoring one against it is a self-comparison. Identity
-    # agreement is computed leave-one-out in score_identity() instead.
+    # No match bank here on purpose: it is built from these same
+    # references, so scoring one against it is a self-comparison. Match
+    # agreement is computed leave-one-out in score_match() instead.
     parser = Parser(log)
 
     work = P.root / man["normalized"]["work_path"]
@@ -609,14 +618,14 @@ def main() -> int:
 
     # Who the target is comes from the shared resolver, so tracking, this pack
     # and evaluation cannot disagree about it. It also drops images that contain
-    # a second person who cannot be told apart from the target - the failure that
-    # put a stranger through a full generation.
-    from identity import load_exclusions, resolve_targets
+    # a second candidate that cannot be told apart from the target - the failure
+    # that put a non-target through a full generation.
+    from reference_match import load_exclusions, resolve_targets
     targets = resolve_targets(refs, models, log, load_exclusions(log))
     if not targets["per_image"]:
-        log.error("No reference image yields a verified target face. Refusing to "
-                  "build a pack: conditioning on an unverified face is how the "
-                  "wrong person gets drawn.")
+        log.error("No reference image yields a verified target anchor. Refusing to "
+                  "build a pack: conditioning on an unverified anchor is how the "
+                  "wrong candidate gets drawn.")
         return 1
     usable = [Path(v["file"]) for v in targets["per_image"].values()]
     if len(usable) != len(refs):
@@ -624,7 +633,7 @@ def main() -> int:
                  "excluded, unverified or ambiguous.", len(usable), len(refs))
     verified = {str(Path(v["file"])): v["instance"]
                 for v in targets["per_image"].values()}
-    groups = cluster_references(usable, parser, models, log, args.outfit_deltae,
+    groups = cluster_references(usable, parser, models, log, args.appearance_deltae,
                                 verified=verified)
 
     chunks = pilot_chunks(man) if args.pilot else man["chunks"]
@@ -641,189 +650,192 @@ def main() -> int:
             log.warning("%s: no mask; skipping", sid)
             continue
         log.info("=" * 62)
-        log.info("%s: learning the current outfit from the source", sid)
-        outfit = source_outfit(work, mask_video, parser, args.probe_frames, log)
+        log.info("%s: learning the current appearance from the source", sid)
+        appearance = source_appearance(work, mask_video, parser, args.probe_frames, log)
 
-        # Panels are chosen on IDENTITY EVIDENCE ALONE, across every reference.
+        # Panels are chosen on MATCH EVIDENCE ALONE, across every reference.
         #
-        # Appearance clusters exist to stop two different outfits being combined
+        # Appearance clusters exist to stop two different appearances being combined
         # into one conditioning image. That constraint no longer binds the
-        # external panels: their clothing is segmented out before they are drawn,
-        # so there is no outfit left to conflict. Confining the choice to one
+        # external panels: their attributes are segmented out before they are drawn,
+        # so there is no appearance left to conflict. Confining the choice to one
         # cluster would now throw away viewing angles for no benefit - and
         # missing viewpoints were a real weakness of these references. Clusters
         # are still computed and recorded, as a diagnostic.
         items = [m for g in groups for m in g["members"]]
-        # Verified identity comes from the shared resolver above, not from a
+        # Verified match comes from the shared resolver above, not from a
         # second opinion computed here.
         for m in items:
             rec = targets["per_image"].get(m["file"].name)
             m["agreement"] = (rec or {}).get("agreement", 0.0)
-            m["identity_group"] = "consensus" if rec else None
+            m["match_group"] = "consensus" if rec else None
             m["duplicate_of"] = None
-            m["other_people"] = (rec or {}).get("other_people", 0)
+            m["other_candidates"] = (rec or {}).get("other_candidates", 0)
         consensus = {"members": len(targets["per_image"]),
                      "candidates": targets["instances"],
                      "images": targets["images"],
                      "rejected": len(targets["rejected"]),
-                     "source": "identity.resolve_targets"}
-        score_identity(items)
-        log.info("Identity consensus: %d of %d reference(s) with a face agree "
+                     "source": "reference_match.resolve_targets"}
+        score_match(items)
+        log.info("Match consensus: %d of %d reference(s) with an anchor agree "
                  "(%d near-duplicate(s) collapsed first, so repeated copies "
                  "cannot vote twice)", consensus.get("members", 0),
                  consensus.get("candidates", 0), consensus.get("duplicates", 0))
-        ranked = sorted(items, key=lambda m: (m["identity"]["score"],
-                                              m["identity"]["face_pixels"],
+        ranked = sorted(items, key=lambda m: (m["match"]["score"],
+                                              m["match"]["anchor_pixels"],
                                               m["file"].name), reverse=True)
         for m in ranked:
-            i = m["identity"]
-            log.info("%-34s identity %.3f (consensus agreement %.3f, face %d px, "
-                     "yaw %s, %s%s)", m["file"].name, i["score"], i["agreement"],
-                     i["face_pixels"],
-                     f"{i['yaw']:+.2f}" if i["yaw"] is not None else "n/a",
+            i = m["match"]
+            log.info("%-34s match %.3f (consensus agreement %.3f, anchor %d px, "
+                     "turn %s, %s%s)", m["file"].name, i["score"], i["agreement"],
+                     i["anchor_pixels"],
+                     f"{i['orientation']:+.2f}"
+                     if i["orientation"] is not None else "n/a",
                      "verified" if i["verified"] else "NOT VERIFIED",
                      f", duplicate of {i['duplicate_of']}"
                      if i["duplicate_of"] else "")
-        verified = [m for m in ranked if m["identity"]["verified"]]
+        verified = [m for m in ranked if m["match"]["verified"]]
         if not verified:
-            log.warning("No reference is identity-verified by consensus. Falling "
-                        "back to the best-scoring photograph; identity "
+            log.warning("No reference is match-verified by consensus. Falling "
+                        "back to the best-scoring reference; match "
                         "conditioning is weak and should not be trusted. The "
-                        "garment is unaffected: it comes from the source.")
-        panel_face = (verified or ranked)[0]
+                        "attribute is unaffected: it comes from the source.")
+        panel_anchor = (verified or ranked)[0]
 
         # A second panel earns its place only by showing a genuinely different
-        # HEAD ORIENTATION, and only if it is identity-verified - an unverified
-        # photograph would condition the model on a stranger's face.
+        # ANCHOR ORIENTATION, and only if it is match-verified - an unverified
+        # reference would condition the model on a non-target's anchor.
         #
-        # Ranked by yaw difference where the landmarks give one. The
-        # identity-masked embedding is the fallback for faces the detector could
-        # not land landmarks on; the FULL-image embedding is not used here at
-        # all, because it responds to background, framing and clothing, and a
-        # photograph of the same pose in a different room would win on it.
-        others = [m for m in verified if m is not panel_face
-                  and m["identity"]["duplicate_of"] is None]
+        # Ranked by orientation difference where the keypoints give one. The
+        # match-masked embedding is the fallback for anchors the detector could
+        # not land keypoints on; the FULL-image embedding is not used here at
+        # all, because it responds to background, framing and attributes, and a
+        # reference at the same angle in a different setting would win on it.
+        others = [m for m in verified if m is not panel_anchor
+                  and m["match"]["duplicate_of"] is None]
         alt, alt_why = None, ""
-        y0 = panel_face["identity"]["yaw"]
-        with_yaw = [m for m in others if m["identity"]["yaw"] is not None]
-        if y0 is not None and with_yaw:
-            alt = max(with_yaw, key=lambda m: abs(m["identity"]["yaw"] - y0))
-            d = abs(alt["identity"]["yaw"] - y0)
-            alt_why = (f"head yaw differs by {d:.2f} "
-                       f"({y0:+.2f} -> {alt['identity']['yaw']:+.2f})")
+        y0 = panel_anchor["match"]["orientation"]
+        with_turn = [m for m in others if m["match"]["orientation"] is not None]
+        if y0 is not None and with_turn:
+            alt = max(with_turn, key=lambda m: abs(m["match"]["orientation"] - y0))
+            d = abs(alt["match"]["orientation"] - y0)
+            alt_why = (f"anchor orientation differs by {d:.2f} "
+                       f"({y0:+.2f} -> {alt['match']['orientation']:+.2f})")
             if d < 0.10:
-                log.info("The most different head orientation available differs "
-                         "by only %.2f; the references all face much the same way, so "
-                         "the second panel adds angle coverage in name only.", d)
+                log.info("The most different anchor orientation available differs "
+                         "by only %.2f; the references are all oriented much the "
+                         "same way, so the second panel adds angle coverage in "
+                         "name only.", d)
         elif others:
             alt = min(others, key=lambda m: float(
-                np.dot(m["clip_identity"], panel_face["clip_identity"])))
-            alt_why = ("no landmarks; identity-masked embedding distance "
-                       f"{1 - float(np.dot(alt['clip_identity'], panel_face['clip_identity'])):.3f}")
+                np.dot(m["clip_match"], panel_anchor["clip_match"])))
+            alt_why = ("no keypoints; match-masked embedding distance "
+                       f"{1 - float(np.dot(alt['clip_match'], panel_anchor['clip_match'])):.3f}")
         if alt is not None:
             log.info("alternate view: %s (%s; chosen among %d verified, "
                      "non-duplicate reference(s))", alt["file"].name, alt_why,
                      len(others))
         else:
-            log.info("No second identity-verified, non-duplicate reference; the "
-                     "pack uses one identity panel.")
-        best_g = int(panel_face["cluster"])
+            log.info("No second match-verified, non-duplicate reference; the "
+                     "pack uses one match panel.")
+        best_g = int(panel_anchor["cluster"])
 
-        # Diagnostic only: how far the chosen photographs' clothing is from what
-        # is actually worn in this interval. Recorded as evidence that the
-        # external clothing is incompatible - never as a reason to use it.
+        # Diagnostic only: how far the chosen references' attributes are from what
+        # is actually present in this interval. Recorded as evidence that the
+        # external attributes are incompatible - never as a reason to use them.
         chosen_pal: dict = {}
-        for m in ([panel_face] + ([alt] if alt is not None else [])):
+        for m in ([panel_anchor] + ([alt] if alt is not None else [])):
             for k, v in m["palette"].items():
                 chosen_pal.setdefault(k, v)
-        shared = set(chosen_pal) & set(outfit["palette"])
+        shared = set(chosen_pal) & set(appearance["palette"])
         best_d = (float(np.mean([delta_e(chosen_pal[k]["lab"],
-                                         outfit["palette"][k]["lab"])
+                                         appearance["palette"][k]["lab"])
                                  for k in shared])) if shared else float("nan"))
-        same_look = best_d == best_d and best_d < args.outfit_deltae
-        log.info("Chosen references' garments are dE %.1f from this interval's "
-                 "(%s). Either way the garment comes from the source; this is a "
+        same_look = best_d == best_d and best_d < args.appearance_deltae
+        log.info("Chosen references' attributes are dE %.1f from this interval's "
+                 "(%s). Either way the attribute comes from the source; this is a "
                  "diagnostic, not a switch.",
                  best_d if best_d == best_d else float("nan"),
-                 "similar" if same_look else "a different outfit"
-                 if best_d == best_d else "no shared garment class")
+                 "similar" if same_look else "a different appearance"
+                 if best_d == best_d else "no shared attribute class")
 
-        # Does the source show a covered face? If so, an external photograph of
-        # an uncovered one must not condition the face: that would remove what
-        # the person is actually wearing. make_protected_mask.py decides this;
+        # Does the source show a covered anchor? If so, an external reference
+        # showing an uncovered one must not condition the anchor: that would remove
+        # an attribute the source actually carries. make_protected_mask.py decides this;
         # absent its verdict we fail closed and assume covered.
         _shot = next(x for x in man["shots"] if x["shot_id"] == sid)
         prot = _shot.get("protected_mask") or {}
-        face_ok = bool(prot.get("face_conditioning_allowed"))
+        anchor_ok = bool(prot.get("anchor_conditioning_allowed"))
         if not prot:
-            face_ok = False
+            anchor_ok = False
             log.warning("%s: no protected-mask analysis, so it is unknown whether "
-                        "the source face is covered. Failing closed: external "
-                        "FACE conditioning is disabled and only hair is used. "
-                        "Run scripts/make_protected_mask.py first.", sid)
-        elif not face_ok:
-            log.warning("%s: the source face is COVERED. External face "
-                        "conditioning is disabled; only hair is conditioned, so "
-                        "an uncovered photograph cannot instruct the model to "
-                        "take the covering off.", sid)
-        allowed = IDENTITY_ONLY if face_ok else (IDENTITY_ONLY - {"face"})
-        log.info("%s: external photographs may condition %s (source face %s)",
+                        "the source anchor is covered. Failing closed: external "
+                        "ANCHOR conditioning is disabled and only the surrounding "
+                        "class is used. Run scripts/make_protected_mask.py first.",
+                        sid)
+        elif not anchor_ok:
+            log.warning("%s: the source anchor is COVERED. External anchor "
+                        "conditioning is disabled; only the surrounding class is "
+                        "conditioned, so an uncovered reference cannot instruct "
+                        "the model to take the covering off.", sid)
+        allowed = MATCH_ONLY if anchor_ok else (MATCH_ONLY - {"face"})
+        log.info("%s: external references may condition %s (source anchor %s)",
                  sid, "+".join(sorted(allowed)) or "NOTHING",
-                 "exposed" if face_ok else "covered/unknown")
+                 "exposed" if anchor_ok else "covered/unknown")
 
         pack = {
             "shot_id": sid,
             "cluster": best_g,
             "clusters_found": len(groups),
             "references_considered": len(items),
-            # Invariant, not a decision. The garment in this interval is the only
-            # record of what is being worn, so it is always the authority; the
-            # externals only ever contribute identity. Making this conditional on
-            # a colour distance meant a coincidentally similar photograph could
-            # promote itself to garment source, which is the failure being fixed.
-            "outfit_authority": "source_frames",
-            "identity_authority": "external_photographs",
-            "external_garment_similarity": {
+            # Invariant, not a decision. The attribute in this interval is the only
+            # record of the attribute present, so it is always the authority; the
+            # externals only ever contribute match. Making this conditional on
+            # a colour distance meant a coincidentally similar reference could
+            # promote itself to attribute source, which is the failure being fixed.
+            "appearance_authority": "source_frames",
+            "match_authority": "external_references",
+            "external_attribute_similarity": {
                 "deltaE_to_source": (round(best_d, 2) if best_d == best_d
                                      else None),
-                "threshold": args.outfit_deltae,
-                "looks_like_same_outfit": bool(same_look),
-                "note": "diagnostic only; does not affect where the garment "
+                "threshold": args.appearance_deltae,
+                "looks_like_same_appearance": bool(same_look),
+                "note": "diagnostic only; does not affect where the attribute "
                         "comes from",
             },
-            "identity_selection": panel_face["identity"],
-            "identity_consensus": consensus,
+            "match_selection": panel_anchor["match"],
+            "match_consensus": consensus,
             "external_conditioning": {
                 "regions": sorted(allowed),
-                "face_allowed": bool(face_ok),
-                "source_face_covered": bool(prot.get("source_face_covered", True)),
-                "note": "arms and legs are never conditioned externally: how "
-                        "much limb is visible is sleeve and hemline coverage, "
+                "anchor_allowed": bool(anchor_ok),
+                "source_anchor_covered": bool(prot.get("source_anchor_covered", True)),
+                "note": "peripheral extents are never conditioned externally: "
+                        "how much of the extent is visible is attribute coverage, "
                         "which belongs to the source",
             },
-            "source_palette": outfit["palette"],
+            "source_palette": appearance["palette"],
             "panels": [
-                {"role": "identity_face_only", "provenance": panel_face["file"].name,
-                 "native_size": panel_face["size"],
+                {"role": "match_anchor_only", "provenance": panel_anchor["file"].name,
+                 "native_size": panel_anchor["size"],
                  "upscaled": False,
-                 "conditions": "face, hair and exposed skin only; clothing and "
+                 "conditions": "the anchor region only; attributes and "
                                "accessories segmented out",
-                 "face_fraction": round(float(panel_face["face_frac"] or 0), 4),
-                 "identity": panel_face["identity"],
-                 "cluster": panel_face["cluster"]},
-                {"role": "exact_outfit_body",
-                 "provenance": f"source frame {outfit['best']['frame']} "
+                 "anchor_fraction": round(float(panel_anchor["anchor_frac"] or 0), 4),
+                 "match": panel_anchor["match"],
+                 "cluster": panel_anchor["cluster"]},
+                {"role": "exact_appearance_extent",
+                 "provenance": f"source frame {appearance['best']['frame']} "
                                f"of this interval",
-                 "note": "garment shape, boundaries, accessories and colour come "
+                 "note": "attribute shape, boundaries, accessories and colour come "
                          "from the footage itself, which is the only correct "
-                         "authority for what is being worn here"},
+                         "authority for the attribute present here"},
             ],
         }
         if alt is not None:
             pack["panels"].append(
-                {"role": "alternate_angle_identity_only",
+                {"role": "alternate_angle_match_only",
                  "provenance": alt["file"].name,
-                 "conditions": "identity regions only; clothing segmented out",
+                 "conditions": "match regions only; attributes segmented out",
                  "native_size": alt["size"], "upscaled": False})
 
         # ---- render the sheet ------------------------------------------------
@@ -831,23 +843,23 @@ def main() -> int:
         n = len(pack["panels"])
         pw, ph = W // n, H
         sheet = Image.new("RGB", (W, H), (0, 0, 0))
-        # EXTERNAL panels are stripped to identity before they are drawn. Their
-        # clothing is from another day; leaving it visible invites the model to
+        # EXTERNAL panels are stripped to match before they are drawn. Their
+        # attributes are from another day; leaving them visible invites the model to
         # reproduce it, which is the fault being corrected. The SOURCE panel is
-        # left whole - it is the only correct record of the current garment.
-        imgs, keeps = build_panel_images(panel_face, outfit["best"]["crop"],
+        # left whole - it is the only correct record of the current attribute.
+        imgs, keeps = build_panel_images(panel_anchor, appearance["best"]["crop"],
                                          alt, allowed=allowed)
         for i, k in enumerate(keeps):
             if k is None:
                 continue
-            pack["panels"][i]["clothing_removed"] = True
-            pack["panels"][i]["identity_pixels_kept"] = round(k, 4)
+            pack["panels"][i]["attributes_removed"] = True
+            pack["panels"][i]["match_pixels_kept"] = round(k, 4)
         low = [pack["panels"][i]["role"] for i, k in enumerate(keeps)
                if k is not None and k < 0.05]
         if low:
-            log.warning("%s: identity masking kept under 5%% of panel(s) %s. The "
-                        "parser may have failed on those photographs; check the "
-                        "pack sheet before trusting the identity conditioning.",
+            log.warning("%s: match masking kept under 5%% of panel(s) %s. The "
+                        "parser may have failed on those references; check the "
+                        "pack sheet before trusting the match conditioning.",
                         sid, ", ".join(low))
         for i, im in enumerate(imgs):
             k = min(pw / im.width, ph / im.height)
@@ -863,20 +875,20 @@ def main() -> int:
         pack["key"] = geometry_key({}, {
             "shot": sid, "cluster": best_g, "w": W, "h": H,
             "panels": [p["provenance"] for p in pack["panels"]],
-            "palette": {k: v["lab"] for k, v in outfit["palette"].items()}})
+            "palette": {k: v["lab"] for k, v in appearance["palette"].items()}})
         (pack_dir / f"{sid}_pack.json").write_text(json.dumps(
             {k: v for k, v in pack.items()}, indent=2, default=str) + "\n")
 
         shot = next(s for s in man["shots"] if s["shot_id"] == sid)
         shot["reference_pack"] = {
             "sheet": pack["sheet"], "key": pack["key"], "cluster": best_g,
-            "outfit_authority": pack["outfit_authority"],
-            "identity_authority": pack["identity_authority"],
-            "identity_score": panel_face["identity"]["score"],
-            "external_garment_deltaE": pack["external_garment_similarity"][
+            "appearance_authority": pack["appearance_authority"],
+            "match_authority": pack["match_authority"],
+            "match_score": panel_anchor["match"]["score"],
+            "external_attribute_deltaE": pack["external_attribute_similarity"][
                 "deltaE_to_source"]}
-        log.info("%s: pack -> %s (%d panels; identity from externals, garment "
-                 "from %s)", sid, rel(sheet_path), n, pack["outfit_authority"])
+        log.info("%s: pack -> %s (%d panels; match from externals, attribute "
+                 "from %s)", sid, rel(sheet_path), n, pack["appearance_authority"])
         made += 1
 
     save_manifest(man)

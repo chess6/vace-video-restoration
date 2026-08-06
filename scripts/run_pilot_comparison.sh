@@ -68,7 +68,7 @@ step "Runtime / VRAM / disk"  $PY scripts/estimate_pipeline.py
 
 # 5. Everything that needs a human eye, in one archive. Always the last step:
 #    nothing in this project displays anything, so the review bundle is how the
-#    work actually reaches the person who has to judge it.
+#    work actually reaches the candidate who has to judge it.
 step "Review bundle" $PY scripts/make_review_bundle.py
 
 say "Done"

@@ -39,8 +39,8 @@ class ComfyClient:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read())
         except urllib.error.HTTPError as e:
-            body = e.read().decode(errors="replace")
-            raise ComfyError(f"POST {path} -> HTTP {e.code}\n{body}") from None
+            extent = e.read().decode(errors="replace")
+            raise ComfyError(f"POST {path} -> HTTP {e.code}\n{extent}") from None
 
     # -- public -------------------------------------------------------------
     def is_up(self) -> bool:

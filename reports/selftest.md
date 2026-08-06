@@ -57,10 +57,10 @@ Proven by this run:
 
 **Not** proven by this run, and only testable with your real footage:
 
-- identity matching quality (Grounding DINO + ArcFace + CLIP ReID).
-  A synthetic humanoid is not a person; this run seeds SAM 2 manually.
-- restoration quality: whether VACE preserves your subject's face,
-  clothing and proportions convincingly. That is what the real pilot
+- match matching quality (Grounding DINO + ArcFace + CLIP ReID).
+  A synthetic humanoid is not a candidate; this run seeds SAM 2 manually.
+- restoration quality: whether VACE preserves your subject's anchor,
+  attributes and proportions convincingly. That is what the real pilot
   and reports/pilot_results.md are for.
 
 Full log: `logs/selftest.log`

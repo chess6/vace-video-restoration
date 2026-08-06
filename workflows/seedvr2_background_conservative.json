@@ -899,7 +899,7 @@
   "groups": [],
   "config": {},
   "extra": {
-    "note": "SeedVR2 3B (fp8_e4m3fn) full-frame restoration - background_conservative. Prioritises structural and temporal fidelity. Least likely to invent detail, alter signage or mutate distant faces."
+    "note": "SeedVR2 3B (fp8_e4m3fn) full-frame restoration - background_conservative. Prioritises structural and temporal fidelity. Least likely to invent detail, alter signage or mutate distant anchors."
   },
   "version": 0.4
 }

@@ -1,29 +1,29 @@
 #!/usr/bin/env python
-"""Phase 8d - the protected-apparel regeneration submask.
+"""Phase 8d - the protected-attribute regeneration submask.
 
-The full subject mask says "this whole figure is the subject". Handing that to
-VACE says something much stronger: regenerate all of it - garment, sleeves,
-hemline, accessories, face covering and all. With reference photographs in play
-that is an invitation to redesign what the person is wearing, and it is what
-produced a repainted garment at dE 25 and an invented bag.
+The full subject mask says "this whole subject is the subject". Handing that to
+VACE says something much stronger: regenerate all of it - every attribute, every
+boundary, every accessory, every covering. With external references in play that
+is an invitation to redesign the attributes the source actually carries, and it is
+what produced a repainted attribute at dE 25 and an invented accessory.
 
 This derives a much smaller mask: only the regions a reference can legitimately
-improve, which is the head, and only where the parser is CONFIDENT the region is
+improve - the anchor region - and only where the parser is CONFIDENT the region is
 exposed. Everything else stays black and is supplied by the SeedVR2 plate, so
-the existing garment is restored rather than regenerated.
+the existing attribute is restored rather than regenerated.
 
 Fail closed, in three ways that all matter at low resolution:
 
-  * low parser confidence is treated as garment, not as skin;
-  * a margin is eroded away from every boundary with a garment or covering
+  * low parser confidence is treated as attribute, not as exposed;
+  * a margin is eroded away from every boundary with an attribute or covering
     class, because that boundary is exactly where the parser is least reliable
-    and where a sleeve edge would be lost;
+    and where an attribute edge would be lost;
   * a region must persist across neighbouring frames to be regenerated, so a
-    single frame's misparse cannot open a hole in the clothing.
+    single frame's misparse cannot open a hole in the attributes.
 
-It also answers a question the pack needs: is the source face COVERED? If it is,
-an external photograph showing an uncovered face must not be allowed to condition
-the face at all - that would remove the covering the person is actually wearing.
+It also answers a question the pack needs: is the source anchor COVERED? If it is,
+an external reference showing it uncovered must not be allowed to condition the
+anchor at all - that would remove a covering the source actually carries.
 
     scripts/make_protected_mask.py [--pilot] [--shot shot0000]
 """
@@ -43,10 +43,10 @@ from common import (  # noqa: E402
 )
 
 # Confidence below which a pixel is not trusted to be anything. Deliberately
-# high: the cost of a false "exposed" is deleting clothing, the cost of a false
-# "covered" is a slightly smaller improvement.
+# high: the cost of a false "exposed" is deleting an attribute, the cost of a
+# false "covered" is a slightly smaller improvement.
 MIN_CONF = 0.70
-# Erosion, in pixels, away from any garment/covering boundary.
+# Erosion, in pixels, away from any attribute/covering boundary.
 SAFETY_PX = 3
 # A pixel must be exposed on at least this fraction of a small temporal window.
 PERSIST = 0.75
@@ -66,7 +66,7 @@ def main() -> int:
 
     import cv2
     from PIL import Image
-    from make_reference_pack import COVERING, GARMENT, HEAD, LBL, Parser
+    from make_reference_pack import ANCHOR_REGION, ATTRIBUTE, COVERING, LBL, Parser
 
     log = setup_logging("make_protected_mask", args.verbose)
     cfg = load_config(args.config)
@@ -79,7 +79,7 @@ def main() -> int:
     REGENERABLE = {"face", "hair"}
     ids = {n: i for i, n in LBL.items()}
     regen_ids = [ids[n] for n in REGENERABLE]
-    protect_ids = [ids[n] for n in (GARMENT | COVERING)]
+    protect_ids = [ids[n] for n in (ATTRIBUTE | COVERING)]
 
     chunks = pilot_chunks(man) if args.pilot else man["chunks"]
     shot_ids = sorted({c["shot_id"] for c in chunks})
@@ -101,7 +101,7 @@ def main() -> int:
             cap.read()
 
         exposed_stack, subj_stack = [], []
-        head_px, skin_px, cover_px = 0, 0, 0
+        anchor_px, exposed_px, cover_px = 0, 0, 0
         while True:
             ok, f = cap.read()
             okm, m = mcap.read()
@@ -116,8 +116,8 @@ def main() -> int:
             protect = (np.isin(lab, protect_ids) | ~confident) & subj
 
             # Pull back from every protected boundary. The parser is least
-            # reliable exactly at a sleeve or collar edge, and that edge is what
-            # must survive.
+            # reliable exactly at an attribute edge, and that edge is what must
+            # survive.
             if args.safety_px > 0 and protect.any():
                 k = np.ones((2 * args.safety_px + 1,) * 2, np.uint8)
                 near_protected = cv2.dilate(protect.astype(np.uint8), k).astype(bool)
@@ -125,10 +125,10 @@ def main() -> int:
             exposed_stack.append(regen)
             subj_stack.append(subj)
 
-            # Head composition, for the covering question.
-            head = np.isin(lab, [ids[n] for n in HEAD]) & subj
-            head_px += int(head.sum())
-            skin_px += int((np.isin(lab, [ids["face"]]) & confident & subj).sum())
+            # Anchor-region composition, for the covering question.
+            anchor = np.isin(lab, [ids[n] for n in ANCHOR_REGION]) & subj
+            anchor_px += int(anchor.sum())
+            exposed_px += int((np.isin(lab, [ids["face"]]) & confident & subj).sum())
             cover_px += int((np.isin(lab, [ids[n] for n in COVERING])
                              & confident & subj).sum())
         cap.release(); mcap.release()
@@ -149,7 +149,7 @@ def main() -> int:
         # motion compensation, so a neighbouring frame vouches for a pixel at its
         # own coordinates, not at this frame's. Without this intersection a
         # region exposed in the neighbours but covered *now* is opened for
-        # regeneration over clothing that is present in this very frame - the
+        # regeneration over an attribute present in this very frame - the
         # exact failure the authority split exists to prevent. Persistence may
         # only ever withdraw permission, never grant it.
         final = (persist >= PERSIST) & (arr > 0.5)
@@ -171,22 +171,22 @@ def main() -> int:
         subj_total = float(np.stack(subj_stack).sum())
         regen_total = float(final.sum())
         frac = regen_total / max(1.0, subj_total)
-        face_exposed = skin_px / max(1, head_px)
-        covered = bool(cover_px > skin_px) or face_exposed < 0.15
+        anchor_exposed = exposed_px / max(1, anchor_px)
+        covered = bool(cover_px > exposed_px) or anchor_exposed < 0.15
 
         log.info("%s: %d frame(s). Regeneration submask covers %.2f%% of the "
-                 "tracked figure; the other %.2f%% is protected and comes from "
+                 "tracked subject; the other %.2f%% is protected and comes from "
                  "the plate.", sid, n, 100 * frac, 100 * (1 - frac))
-        log.info("%s: head composition - %.1f%% confidently exposed face skin, "
-                 "%.1f%% covering classes -> source face is %s", sid,
-                 100 * face_exposed, 100 * cover_px / max(1, head_px),
+        log.info("%s: anchor-region composition - %.1f%% confidently exposed, "
+                 "%.1f%% covering classes -> source anchor is %s", sid,
+                 100 * anchor_exposed, 100 * cover_px / max(1, anchor_px),
                  "COVERED" if covered else "exposed")
         if covered:
-            log.warning("%s: the source face reads as COVERED. External "
-                        "photographs showing an uncovered face must not "
-                        "condition the face here - that would remove what the "
-                        "person is wearing. Face conditioning is disabled for "
-                        "this shot.", sid)
+            log.warning("%s: the source anchor reads as COVERED. External "
+                        "references showing it uncovered must not condition the "
+                        "anchor here - that would remove an attribute the source "
+                        "carries. Anchor conditioning is disabled for this shot.",
+                        sid)
         if frac < 0.02:
             log.warning("%s: almost nothing is confidently exposed (%.2f%%). At "
                         "this resolution there is no region a reference can "
@@ -202,9 +202,9 @@ def main() -> int:
             "safety_px": args.safety_px,
             "persistence": PERSIST,
             "regenerable_classes": sorted(REGENERABLE),
-            "source_face_exposed_fraction": round(face_exposed, 4),
-            "source_face_covered": covered,
-            "face_conditioning_allowed": not covered,
+            "source_anchor_exposed_fraction": round(anchor_exposed, 4),
+            "source_anchor_covered": covered,
+            "anchor_conditioning_allowed": not covered,
             "frames": n,
         }
     save_manifest(man)

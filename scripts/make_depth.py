@@ -2,7 +2,7 @@
 """Phase 7 - depth control videos from the normalized working stream.
 
 Depth (not pose, not edges) is the baseline structural control: the goal is to
-preserve the whole figure's shape, volume and motion, not just facial landmarks.
+preserve the whole subject's shape, volume and motion, not just the anchor's keypoints.
 
 Runs Depth Anything V2 (Large) as a SEPARATE stage from VACE so the two never
 compete for VRAM. ComfyUI can stay running; this uses its own process.
@@ -43,7 +43,7 @@ def build_full_canny(work: Path, out: Path, width: int, height: int, fps: int,
 
     Kept available per the brief but NOT the baseline: edges alone describe the
     silhouette and creases but carry no volume, so the model has less to go on
-    for a whole figure than depth gives it. Useful as a comparison, or on
+    for a whole subject than depth gives it. Useful as a comparison, or on
     material where Depth Anything is unstable.
     """
     import cv2

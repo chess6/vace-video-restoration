@@ -2,12 +2,12 @@
 
 Reference-conditioned generative restoration of long-form, low-resolution video
 using **Wan2.1-VACE-1.3B** inside **ComfyUI**, driven by depth control, a tracked
-full-figure mask and a reference sheet built from higher-quality stills of the
-main figure.
+full-subject mask and a reference sheet built from higher-quality stills of the
+main subject.
 
 This is deliberately **not** conventional super-resolution. The premise is that
 detail-hallucinating upscalers applied directly to a degraded source cannot
-recover identity, because the information is not there to recover. Real-ESRGAN
+recover match, because the information is not there to recover. Real-ESRGAN
 appears here only as an optional *final* resize of already-restored output, and
 only after being compared against a plain Lanczos resize.
 
@@ -19,14 +19,14 @@ artefact is written to disk for you to open yourself.
 ## How it works
 
 Two models, each doing the job it is actually good at: **SeedVR2 3B** restores the
-whole frame, and **VACE 1.3B** replaces only the tracked main figure on top of
+whole frame, and **VACE 1.3B** replaces only the tracked main subject on top of
 that, using the reference sheet.
 
 ```
 Original video
 ├── scene cuts, timing, depth, masks and subject motion   <- ALWAYS from the original
 └── SeedVR2 full-frame restoration  (background_conservative | background_aggressive)
-      └── VACE replaces only the masked main figure using reference images
+      └── VACE replaces only the masked main subject using reference images
             └── blend / composite   (in_vace | composite)
                   └── exact-timeline assembly with the original audio
 ```
@@ -50,7 +50,7 @@ inputs/source/your.mp4  (never modified)
                                               │
 inputs/references/*.jpg ──► prepare_references.py
         (never modified)      EXIF fix, dedupe, reject corrupt/small,
-                              identity-cluster to drop other people,
+                              match-cluster to drop other candidates,
                               pick ≤3 complementary views,
                               tile into ONE clean sheet
                                               │
@@ -59,7 +59,7 @@ inputs/references/*.jpg ──► prepare_references.py
                         make_depth.py   track_subject.py   (manifest)
                         Depth Anything  Grounding DINO →
                         V2 per frame    ArcFace + CLIP ReID →
-                                        SAM 2.1 full-figure track
+                                        SAM 2.1 full-subject track
                               │               │
                               └───────┬───────┘
                                       ▼
@@ -112,7 +112,7 @@ cd vace-video-restoration
 
 # 0. put your media in place
 cp /path/to/your_video.mp4        inputs/source/
-cp /path/to/reference_photos/*    inputs/references/
+cp /path/to/reference_stills/*    inputs/references/
 
 # 1. sanity-check the machine
 scripts/verify_env.sh
@@ -135,7 +135,7 @@ venv/bin/python scripts/prepare_references.py
 # 6. depth control
 venv/bin/python scripts/make_depth.py
 
-# 7. automatic identity-aware subject tracking
+# 7. automatic match-aware subject tracking
 venv/bin/python scripts/track_subject.py
 #    -> intermediate/masks/review/*.png   (check these)
 #    -> reports/tracking_report.json      (confidence per shot)

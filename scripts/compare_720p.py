@@ -133,8 +133,8 @@ def mask_box(masks: np.ndarray, pad: float = 0.15):
 def sharpness_in_mask(frames: np.ndarray, masks: np.ndarray, idx) -> float | None:
     """Sharpness over the mask's PIXELS, not its bounding box.
 
-    A bounding box around a head is mostly not the head: the protected submask
-    is 4.42% of the figure and its box is twenty times that, so a box-based
+    A bounding box around the anchor is mostly not the anchor: the protected submask
+    is 4.42% of the subject and its box is twenty times that, so a box-based
     number is dominated by pixels the plate supplied and reports the plate's
     sharpness back as if VACE had produced it. This is the only measurement that
     sees what was actually regenerated.
@@ -252,7 +252,7 @@ def main() -> int:
                  f"{100 * (f_ch / b_ch - 1):+.1f}%" if f_ch and b_ch else "-")
     log.info("=" * 86)
     log.info("`in-mask` is the only column that sees what was regenerated. A box "
-             "around a head is mostly not the head and reports the plate's work.")
+             "around the anchor is mostly not the anchor and reports the plate's work.")
     log.info("Read `chroma` beside it: coloured static raises sharpness without "
              "adding structure, and is how a noisier output wins on a proxy.")
 

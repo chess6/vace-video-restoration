@@ -3,10 +3,10 @@
 # These run OUTSIDE ComfyUI, one stage at a time, so they never compete with VACE
 # for VRAM.
 #
-#   SAM 2.1 (hiera-large)          -> full-figure mask tracking          (Phase 6)
-#   Grounding DINO (base)          -> open-vocabulary person detection   (Phase 6)
-#   CLIP ViT-L/14                  -> appearance / clothing ReID embedding (Phase 6)
-#   InsightFace buffalo_l          -> face identity embedding            (Phase 6)
+#   SAM 2.1 (hiera-large)          -> full-subject mask tracking          (Phase 6)
+#   Grounding DINO (base)          -> open-vocabulary candidate detection   (Phase 6)
+#   CLIP ViT-L/14                  -> appearance / attributes ReID embedding (Phase 6)
+#   InsightAnchor buffalo_l          -> anchor match embedding            (Phase 6)
 #   Depth Anything V2 (Large)      -> structural depth control           (Phase 7)
 #
 # Pinned versions are recorded in reports/versions.md by scripts/record_versions.sh
@@ -32,7 +32,7 @@ fi
 "$PY" -c "import sam2; print('sam2 OK:', sam2.__file__)" || exit 1
 
 echo
-echo "=== 2/3 Prefetching Hugging Face models into $HF_HOME ==="
+echo "=== 2/3 Prefetching Hugging Anchor models into $HF_HOME ==="
 "$PY" - <<'PYEOF'
 import os, sys
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
@@ -60,7 +60,7 @@ PYEOF
 [ $? -ne 0 ] && { echo "ERROR: HF prefetch failed"; exit 1; }
 
 echo
-echo "=== 3/3 Prefetching InsightFace buffalo_l (face identity) ==="
+echo "=== 3/3 Prefetching InsightAnchor buffalo_l (anchor match) ==="
 "$PY" - <<'PYEOF'
 import os, sys
 os.environ.setdefault("INSIGHTFACE_HOME", os.environ.get("INSIGHTFACE_HOME", os.path.expanduser("~/.insightface")))
@@ -73,7 +73,7 @@ try:
     print("[ok]  insightface buffalo_l ready")
 except Exception as e:
     print(f"[WARN] insightface prefetch failed: {e}", file=sys.stderr)
-    print("       Face matching will degrade to appearance-only ReID, which still works.", file=sys.stderr)
+    print("       Anchor matching will degrade to appearance-only ReID, which still works.", file=sys.stderr)
     sys.exit(0)   # non-fatal: appearance ReID alone is a valid fallback
 PYEOF
 

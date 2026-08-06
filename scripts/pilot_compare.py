@@ -46,9 +46,9 @@ from common import (  # noqa: E402
 #   "A" preserved in-VACE      "B" composited on the subject mask
 #   "R" ROI, mapped back       "P" composited on the PROTECTED submask
 # "P" exists because the retained pipeline runs run_chunks --protected, which
-# regenerates only the head. Compositing that on the SUBJECT mask would take the
-# whole figure from VACE's VAE round-trip of the plate and lose ~8% of the
-# garment's detail for nothing; the protected submask is the correct alpha.
+# regenerates only the anchor region. Compositing that on the SUBJECT mask would take the
+# whole subject from VACE's VAE round-trip of the plate and lose ~8% of the
+# attribute's detail for nothing; the protected submask is the correct alpha.
 # Without a P entry the protected comparison was not reproducible through this
 # script at all - it only existed as commands typed by hand.
 PLAN = [
@@ -73,15 +73,15 @@ PLAN = [
      "Baseline VACE subject composited onto the aggressive plate."),
     ("vace_protected_conservative", "prot_bg_conservative",
      "background_conservative", "P",
-     "Protected run: VACE regenerates only the confidently exposed head, "
+     "Protected run: VACE regenerates only the confidently exposed anchor region, "
      "composited onto the conservative plate using that same submask, so the "
-     "garment stays plate-exact."),
+     "attribute stays plate-exact."),
     ("vace_protected_aggressive", "prot_bg_aggressive",
      "background_aggressive", "P",
      "Protected run over the aggressive plate."),
     ("vace_roi_conservative", "roi", "background_conservative", "R",
      "Subject generated on the stabilized ROI crop, then mapped back to full "
-     "frame over the conservative plate. Only the masked figure comes from the "
+     "frame over the conservative plate. Only the masked subject comes from the "
      "ROI pass: it saw a different framing, so its idea of the background is "
      "not comparable and must not leak in."),
 ]
@@ -203,7 +203,7 @@ def main() -> int:
 
         if path == "R":
             # The ROI pass generated on a crop. map_roi_back.py is the exact
-            # inverse of the warp and lays only the masked figure back over the
+            # inverse of the warp and lays only the masked subject back over the
             # plate, so this variant differs from path A in subject resolution
             # and in nothing else.
             for c in pchunks:

@@ -69,7 +69,7 @@ Project root: `/home/thomas/Dev/upscaler/vace-video-restoration`
 | `umt5_xxl_fp8_e4m3fn_scaled.safetensors` | ~6.7 GB |
 | Depth Anything V2 (ViT-L) | ~1.3 GB |
 | SAM 2.1 (hiera-large) | ~0.9 GB |
-| Detector + ReID + face embeddings | ~1.5 GB |
+| Detector + ReID + anchor embeddings | ~1.5 GB |
 | **Install subtotal** | **~24 GB** |
 | Intermediates, 30-min reference workload @ 16 fps 832x480 | ~45-70 GB |
 | Restored 480p master + deliverables | ~15-25 GB |

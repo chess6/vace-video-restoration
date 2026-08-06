@@ -1,22 +1,22 @@
 #!/usr/bin/env python
-"""Phase 6 - identity-aware automatic subject detection and full-figure tracking.
+"""Phase 6 - match-aware automatic subject detection and full-subject tracking.
 
 Fully automatic under normal conditions. No manual boxes or clicks are required;
 the script only asks for help on genuinely ambiguous shots.
 
 Per shot:
   1. Sample representative frames.
-  2. Detect every person with Grounding DINO (open-vocabulary).
-  3. Score each candidate against the target's verified reference faces
-     (scripts/identity.py) using ArcFace similarity ONLY.
+  2. Detect every candidate with Grounding DINO (open-vocabulary).
+  3. Score each candidate against the target's verified reference anchors
+     (scripts/reference_match.py) using ArcFace similarity ONLY.
 
-     Clothing-sensitive appearance similarity used to stand in when no face was
-     visible. That is backwards: when the face cannot be seen is exactly when
-     clothing similarity is least able to tell two people apart. A candidate
-     with no resolvable face now scores nothing and the shot is flagged for a
+     Attributes-sensitive appearance similarity used to stand in when no anchor was
+     visible. That is backwards: when the anchor cannot be seen is exactly when
+     attributes similarity is least able to tell two candidates apart. A candidate
+     with no resolvable anchor now scores nothing and the shot is flagged for a
      human rather than tracked on a guess.
   4. Take the highest-confidence candidate, initialise SAM 2.1 from its generated
-     box, and track the WHOLE FIGURE (not just the face) through the shot.
+     box, and track the WHOLE SUBJECT (not just the anchor) through the shot.
   5. Re-detect and re-seed after tracking-confidence loss, disappearance,
      reappearance or a sudden mask-area jump.
   6. Emit frame-aligned grayscale mask videos, review contact sheets and
@@ -58,15 +58,16 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
-    IMAGE_EXTS, P, human_time, load_config, load_manifest, probe_frames, rel,
-    require_cuda, require_tools, run, save_manifest, setup_logging, slice_frames,
+    IMAGE_EXTS, P, human_time, load_config, load_manifest, probe_frames,
+    prompt_overlay, rel, require_cuda, require_tools, run, save_manifest,
+    setup_logging, slice_frames,
 )
 
 DINO_ID = "IDEA-Research/grounding-dino-base"
 CLIP_ID = "openai/clip-vit-large-patch14"
 SAM2_ID = "facebook/sam2.1-hiera-large"
 
-# Exact Hugging Face revisions. Without these, `from_pretrained` follows the
+# Exact Hugging Anchor revisions. Without these, `from_pretrained` follows the
 # repo's default branch, so the same code silently picks up different weights on
 # a later machine and the run stops being reproducible. Recorded in
 # reports/versions.md.
@@ -74,27 +75,33 @@ DINO_REV = "12bdfa3120f3e7ec7b434d90674b3396eccf88eb"
 CLIP_REV = "32bd64288804d66eefd0ccbe215aa642df71cc41"
 SAM2_REV = "665f8e2ad61cf5f53d65644ff27c8ee525124610"
 
-# Grounding DINO is trained on overwhelmingly upright people, so "a person"
-# alone finds standing bystanders confidently and a reclining figure weakly or
-# not at all - the box is wide rather than tall and matches the prompt poorly.
-# On a shot whose subject is horizontal that bias is not a small ranking effect:
-# it can mean the only candidate offered IS somebody else. The reclining phrasings
-# are here to give that figure its own way of being named.
-DETECT_PROMPT = ("a person. a human. a man. a woman. a child. "
-                 "a person reclining. a reclining figure. a person on the ground. "
-                 "a person on a bed. a person seen from above. a body.")
+# Grounding DINO carries a strong prior for the framing its training set is
+# dominated by. A generic class phrase finds a subject matching that prior
+# confidently and one departing from it weakly or not at all - the box has an
+# unexpected aspect and scores against the phrase poorly. Where a shot departs
+# from the prior the bias is not a small ranking effect: it can mean the only
+# candidate offered is a non-target.
+#
+# So the prompt should name, alongside the generic phrases, whatever framings the
+# source actually contains, giving a subject the generic phrases under-score its
+# own way of being named. Those phrases are load-bearing and they are the one
+# thing a detector prompt cannot state without stating what the subject is, so
+# the whole prompt lives in the untracked overlay and this file does not record
+# which phrases any particular source needed. See common.py::prompt_overlay.
+def detect_prompt() -> str:
+    return prompt_overlay("detect_prompt")
 
-# Grounding DINO box threshold. 0.30 suits clean photographs; a heavily degraded
+# Grounding DINO box threshold. 0.30 suits clean references; a heavily degraded
 # low-resolution source scores the same true detection lower, so when the primary
 # pass finds nothing at all the shot is retried at DETECT_THRESHOLD_MIN before
-# being given up on. A weak *detection* is not the same as a weak *identity*
-# match: whether the shot is trusted is still decided by the fused face and
+# being given up on. A weak *detection* is not the same as a weak *match*
+# match: whether the shot is trusted is still decided by the fused anchor and
 # appearance score below, and a fallback detection is recorded in the report.
 DETECT_THRESHOLD = 0.30
 DETECT_THRESHOLD_MIN = 0.18
 
 # Decision thresholds. Deliberately conservative: it is cheaper to ask about one
-# shot than to silently restore the wrong person for 40 seconds.
+# shot than to silently restore the wrong candidate for 40 seconds.
 AUTO_ACCEPT = 0.42     # fused score at/above which we proceed with no questions
 AMBIGUOUS_MARGIN = 0.08  # top-1 must beat top-2 by this much
 MIN_TRACK_SCORE = 0.0   # SAM2 object score below which a frame is "lost"
@@ -114,7 +121,7 @@ class Models:
         self.log = log
         self._dino = self._dino_proc = None
         self._clip = self._clip_proc = None
-        self._face = None
+        self._anchor = None
         self._sam = None
 
     # -- lazily loaded so a stage that does not need a model never pays for it
@@ -126,7 +133,7 @@ class Models:
             # fp32 weights, not fp16: Grounding DINO fuses a fp32 text branch into
             # the vision features, and a half-precision load fails inside the
             # encoder with "mat1 and mat2 must have the same dtype". Speed comes
-            # from autocast in detect_people() instead. ~0.9 GiB of VRAM.
+            # from autocast in detect_candidates() instead. ~0.9 GiB of VRAM.
             self._dino = AutoModelForZeroShotObjectDetection.from_pretrained(
                 DINO_ID, revision=DINO_REV, dtype=self.torch.float32).to(self.dev).eval()
         return self._dino, self._dino_proc
@@ -140,8 +147,8 @@ class Models:
                 CLIP_ID, revision=CLIP_REV, dtype=self.torch.float16).to(self.dev).eval()
         return self._clip, self._clip_proc
 
-    def face(self):
-        if self._face is None:
+    def anchor(self):
+        if self._anchor is None:
             try:
                 from insightface.app import FaceAnalysis
                 import onnxruntime as ort
@@ -150,14 +157,14 @@ class Models:
                              if cuda_ok else ["CPUExecutionProvider"])
                 app = FaceAnalysis(name="buffalo_l", providers=providers)
                 app.prepare(ctx_id=0 if cuda_ok else -1, det_size=(640, 640))
-                self._face = app
-                self.log.info("Face identity: insightface buffalo_l (%s)", providers[0])
+                self._anchor = app
+                self.log.info("Anchor match: insightface buffalo_l (%s)", providers[0])
             except Exception as e:
-                self.log.warning("insightface unavailable (%s). Identity cannot "
+                self.log.warning("insightface unavailable (%s). Match cannot "
                                  "be established at all; shots will be flagged "
                                  "for manual seeding rather than guessed.", e)
-                self._face = False
-        return self._face or None
+                self._anchor = False
+        return self._anchor or None
 
     def sam(self):
         if self._sam is None:
@@ -181,26 +188,26 @@ class Models:
             f = f / f.norm(dim=-1, keepdim=True)
         return f.cpu().numpy()
 
-    def face_embed(self, pil_image):
-        """Returns (embedding, face_box, face_area_fraction) or (None, None, 0)."""
-        app = self.face()
+    def anchor_embed(self, pil_image):
+        """Returns (embedding, anchor_box, anchor_area_fraction) or (None, None, 0)."""
+        app = self.anchor()
         if app is None:
             return None, None, 0.0
         import cv2
         bgr = cv2.cvtColor(np.asarray(pil_image.convert("RGB")), cv2.COLOR_RGB2BGR)
-        faces = app.get(bgr)
-        if not faces:
+        anchors = app.get(bgr)
+        if not anchors:
             return None, None, 0.0
-        f = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
+        f = max(anchors, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
         fa = ((f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])) / \
              (pil_image.width * pil_image.height)
         return np.asarray(f.normed_embedding, dtype=np.float32), \
             tuple(float(v) for v in f.bbox), float(fa)
 
-    def detect_people(self, pil_image, threshold=DETECT_THRESHOLD) -> list[tuple]:
+    def detect_candidates(self, pil_image, threshold=DETECT_THRESHOLD) -> list[tuple]:
         model, proc = self.dino()
         with self.torch.inference_mode():
-            inputs = proc(images=pil_image, text=DETECT_PROMPT,
+            inputs = proc(images=pil_image, text=detect_prompt(),
                           return_tensors="pt").to(self.dev)
             # autocast rather than a manual .half(): the model is fp32 (see
             # dino()) and autocast casts only the ops that are safe in half,
@@ -216,67 +223,67 @@ class Models:
 
 
 # ---------------------------------------------------------------------------
-# identity bank from the reference images
+# match bank from the reference images
 # ---------------------------------------------------------------------------
 
-def build_identity_bank(models: Models, log) -> dict:
-    """Face embeddings of the ONE person being restored.
+def build_match_bank(models: Models, log) -> dict:
+    """Anchor embeddings of the ONE candidate being restored.
 
-    Delegates to scripts/identity.py so tracking, pack selection and evaluation
+    Delegates to scripts/reference_match.py so tracking, pack selection and evaluation
     all mean the same thing by "the target". See that module for why the old
-    largest-person/largest-face-per-image approach let a second person in.
+    largest-candidate/largest-anchor-per-image approach let a second candidate in.
 
     There is deliberately no appearance bank any more. It was a CLIP embedding
-    of the largest person crop, which responds to clothing, background and
-    framing rather than to who someone is - and because the face term is
-    down-weighted when the face is small, that appearance term DOMINATED at low
-    resolution. Two photographs of a different person, neither with a detectable
-    target face, were enough to carry the selection.
+    of the largest candidate crop, which responds to attributes, background and
+    framing rather than to who someone is - and because the anchor term is
+    down-weighted when the anchor is small, that appearance term DOMINATED at low
+    resolution. Two references of a different candidate, neither with a detectable
+    target anchor, were enough to carry the selection.
     """
-    from identity import load_exclusions, reference_files, resolve_targets
+    from reference_match import load_exclusions, reference_files, resolve_targets
 
     files = reference_files()
     if not files:
         raise RuntimeError(
-            f"No reference images in {P.references}. Identity-aware selection "
+            f"No reference images in {P.references}. Match-aware selection "
             "needs at least one. Add references and run "
             "scripts/prepare_references.py.")
     res = resolve_targets(files, models, log, load_exclusions(log))
     if res["bank"] is None:
         raise RuntimeError(
-            "No usable target face in any reference image. Identity cannot be "
+            "No usable target anchor in any reference image. Match cannot be "
             "established, and tracking on appearance alone is what put the "
-            "wrong person in the last run. Add a reference showing the target's "
-            "face, or seed the shot manually with --init-box / --init-points.")
-    log.info("Identity bank: %d verified target face(s) from %d image(s)",
+            "wrong candidate in the last run. Add a reference showing the target's "
+            "anchor, or seed the shot manually with --init-box / --init-points.")
+    log.info("Match bank: %d verified target anchor(s) from %d image(s)",
              len(res["bank"]), len(res["per_image"]))
-    return {"face": res["bank"],
+    return {"anchor": res["bank"],
             "files": [str(v["file"]) for v in res["per_image"].values()],
             "per_image": res["per_image"],
             "rejected": res["rejected"]}
 
 
 def score_candidate(models: Models, bank: dict, crop) -> dict:
-    """Is this crop the target? Face evidence only.
+    """Is this crop the target? Anchor evidence only.
 
-    Appearance similarity used to fill in when no face was resolvable, which
+    Appearance similarity used to fill in when no anchor was resolvable, which
     sounds like graceful degradation and is really the opposite: it is precisely
-    when the face cannot be seen that clothing similarity is least trustworthy
-    and most likely to pick a stranger. A candidate with no usable face now
+    when the anchor cannot be seen that attribute similarity is least trustworthy
+    and most likely to pick a non-target. A candidate with no usable anchor now
     scores nothing and the shot is flagged for a human, rather than tracked on a
     guess.
     """
-    femb, _, face_frac = models.face_embed(crop)
-    if femb is None or bank.get("face") is None:
-        return {"fused": 0.0, "face_sim": None, "face_frac": face_frac,
-                "reason": "no face resolvable in this candidate"}
-    face_sim = float(np.max(bank["face"] @ femb))
-    # Confidence is the similarity itself, discounted when the face is so small
+    femb, _, anchor_frac = models.anchor_embed(crop)
+    if femb is None or bank.get("anchor") is None:
+        return {"fused": 0.0, "anchor_sim": None, "anchor_frac": anchor_frac,
+                "reason": "no anchor resolvable in this candidate"}
+    anchor_sim = float(np.max(bank["anchor"] @ femb))
+    # Confidence is the similarity itself, discounted when the anchor is so small
     # that the embedding is mostly interpolation. Never promoted by anything
     # else: there is nothing else here to promote it.
-    scale = float(np.clip(face_frac / 0.005, 0.0, 1.0))
-    return {"fused": float(face_sim * scale), "face_sim": face_sim,
-            "face_frac": face_frac, "face_scale": scale}
+    scale = float(np.clip(anchor_frac / 0.005, 0.0, 1.0))
+    return {"fused": float(anchor_sim * scale), "anchor_sim": anchor_sim,
+            "anchor_frac": anchor_frac, "anchor_scale": scale}
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +317,7 @@ def track_shot(models: Models, frames_dir: Path, n_frames: int, seed_frame: int,
     """Propagate a seed through the shot.
 
     Returns (masks[T,H,W] uint8, scores, absent_ranges), where absent_ranges are
-    [a, b) spans in which re-detection found no one matching the identity bank.
+    [a, b) spans in which re-detection found no one matching the match bank.
 
     Long shots are processed in overlapping windows because SAM 2's video state
     grows with frame count and would otherwise exhaust VRAM on a 12 GB card.
@@ -416,7 +423,7 @@ def track_shot(models: Models, frames_dir: Path, n_frames: int, seed_frame: int,
     # track, which used to end the shot: everything past that point stayed black
     # and was merely reported as an event. Instead, re-detect inside each hole and
     # restart propagation there. A hole where re-detection finds nobody matching
-    # the identity bank is genuine absence, and is returned as such so the caller
+    # the match bank is genuine absence, and is returned as such so the caller
     # can treat it as intentional pass-through rather than a failure.
     absent: list[tuple[int, int]] = []
     if reseed is not None:
@@ -521,9 +528,9 @@ def write_mask_video(masks: np.ndarray, out: Path, fps: int, grow: int,
     configured radius did not describe the edge the model actually saw, and the
     result was pixels regenerated outside the intended boundary.
 
-    Holes inside the figure (e.g. a gap between an arm and the torso) are left as
+    Holes inside the subject (e.g. a gap enclosed by its own outline) are left as
     SAM 2 produced them; no fill-holes is applied, so background visible through
-    the figure stays preserved.
+    the subject stays preserved.
     """
     import cv2
     T, H, W = masks.shape
@@ -673,7 +680,7 @@ def main() -> int:
             return 1
 
     models = Models(log)
-    bank = None if manual else build_identity_bank(models, log)
+    bank = None if manual else build_match_bank(models, log)
 
     P.masks.mkdir(parents=True, exist_ok=True)
     review_dir = P.masks / "review"
@@ -731,7 +738,7 @@ def main() -> int:
                 best_c, cands = None, []
                 for pf in probes:
                     im = Image.open(frames[pf]).convert("RGB")
-                    for b in models.detect_people(im, threshold=thr)[:5]:
+                    for b in models.detect_candidates(im, threshold=thr)[:5]:
                         crop = im.crop(tuple(int(v) for v in b[:4]))
                         if crop.width < 12 or crop.height < 24:
                             continue
@@ -747,27 +754,27 @@ def main() -> int:
 
             # "Found somebody" is not "found the subject". The retry below used
             # to fire only when the primary pass found NOTHING, which means a
-            # confident detection of the wrong person suppressed it entirely.
-            # That is what happened on a shot whose subject is reclining: the
-            # detector is trained on upright people, so the target scored below
-            # threshold while an upright bystander scored above it, and the
-            # bystander was the only candidate ever offered.
+            # confident detection of the wrong candidate suppressed it entirely.
+            # That is what happened once: the detector is trained on upright
+            # candidates, so a target whose pose sits far from that prior scored
+            # below threshold while a non-target scored above it, and the
+            # non-target was the only candidate ever offered.
             #
             # So the retry also fires when candidates exist but NONE of them
-            # carries identity evidence: no resolvable face anywhere is exactly
-            # the symptom of the right person never having been surfaced.
+            # carries match evidence: no resolvable anchor anywhere is exactly
+            # the symptom of the right candidate never having been surfaced.
             if (best is not None
-                    and not any(c.get("face_sim") is not None for c in all_cands)
+                    and not any(c.get("anchor_sim") is not None for c in all_cands)
                     and args.detect_threshold_min < det_thr):
                 log.warning("%s: %d candidate(s) at %.2f but not one has a "
-                            "resolvable face. Retrying at %.2f before trusting "
+                            "resolvable anchor. Retrying at %.2f before trusting "
                             "any of them - an unusual pose scores low, and the "
                             "subject may simply never have been surfaced.",
                             sid, len(all_cands), det_thr, args.detect_threshold_min)
                 lo_best, lo_cands = probe_pass(args.detect_threshold_min)
-                if any(c.get("face_sim") is not None for c in lo_cands):
+                if any(c.get("anchor_sim") is not None for c in lo_cands):
                     log.warning("%s: the lower threshold surfaced a candidate "
-                                "WITH identity evidence. Using it.", sid)
+                                "WITH match evidence. Using it.", sid)
                     det_thr, best, all_cands = (args.detect_threshold_min,
                                                 lo_best, lo_cands)
                 else:
@@ -783,28 +790,28 @@ def main() -> int:
                 best, all_cands = probe_pass(det_thr)
                 if best is not None:
                     log.warning("%s: seeded from a WEAK detection (score %.3f). "
-                                "Identity scoring still decides whether this shot "
+                                "Match scoring still decides whether this shot "
                                 "is trusted; check its review sheet.",
                                 sid, best["det_score"])
             if best is None:
-                # Nobody matching anywhere in the shot. That is a fact about the
+                # Noextent matching anywhere in the shot. That is a fact about the
                 # footage, not a failure to be fixed: the shot is passed through
                 # unrestored. It no longer blocks the full-run preflight.
-                log.info("%s: no person detected in any probe frame. Marked "
+                log.info("%s: no candidate detected in any probe frame. Marked "
                          "subject_absent; the shot passes through unrestored.", sid)
                 shot["subject_status"] = "subject_absent"
-                shot["subject_note"] = "no person detected in any probe frame"
+                shot["subject_note"] = "no candidate detected in any probe frame"
                 skip_shot_chunks(man, sid, "subject_absent")
                 report.append({"shot_id": sid, "status": "subject_absent",
-                               "reason": "no person detected", "confidence": 0.0})
+                               "reason": "no candidate detected", "confidence": 0.0})
                 if not args.keep_frames:
                     shutil.rmtree(frames_dir, ignore_errors=True)
                 continue
 
             # Ambiguity is a per-frame question: within one frame, does a second
-            # person score nearly as well as the winner? Comparing across frames
+            # candidate score nearly as well as the winner? Comparing across frames
             # would compare the subject with itself. The worst frame governs,
-            # because an ambiguous frame anywhere can capture the wrong figure -
+            # because an ambiguous frame anywhere can capture the wrong subject -
             # only the winning frame used to be examined.
             per_frame: dict[int, list[float]] = {}
             for c in all_cands:
@@ -827,23 +834,23 @@ def main() -> int:
                       "frames_probed": len(per_frame),
                       **{k: (round(v, 4) if isinstance(v, float) else v)
                          for k, v in best.items() if k != "box"}}
-            n_faced = sum(1 for c in all_cands if c.get("face_sim") is not None)
-            log.info("%s: best candidate frame=%d confidence=%.3f (face match %s, "
-                     "face %.2f%% of crop) worst margin=%.3f at frame %d over %d "
-                     "candidate(s), %d with a resolvable face",
+            n_anchord = sum(1 for c in all_cands if c.get("anchor_sim") is not None)
+            log.info("%s: best candidate frame=%d confidence=%.3f (anchor match %s, "
+                     "anchor %.2f%% of crop) worst margin=%.3f at frame %d over %d "
+                     "candidate(s), %d with a resolvable anchor",
                      sid, seed_frame, conf,
-                     f"{best['face_sim']:.3f}" if best.get("face_sim") is not None
-                     else "NONE", 100 * (best.get("face_frac") or 0.0), margin,
-                     worst_frame, len(all_cands), n_faced)
-            if n_faced == 0:
-                log.warning("%s: NO candidate had a resolvable face. There is no "
-                            "identity evidence in this shot at all. Clothing "
+                     f"{best['anchor_sim']:.3f}" if best.get("anchor_sim") is not None
+                     else "NONE", 100 * (best.get("anchor_frac") or 0.0), margin,
+                     worst_frame, len(all_cands), n_anchord)
+            if n_anchord == 0:
+                log.warning("%s: NO candidate had a resolvable anchor. There is no "
+                            "match evidence in this shot at all. Attributes "
                             "similarity is not used as a substitute - that is "
-                            "what tracked the wrong person before.", sid)
+                            "what tracked the wrong candidate before.", sid)
 
-            if conf < AUTO_ACCEPT or margin < AMBIGUOUS_MARGIN or n_faced == 0:
-                reason = ("no identity evidence: no candidate had a resolvable face"
-                          if n_faced == 0 else
+            if conf < AUTO_ACCEPT or margin < AMBIGUOUS_MARGIN or n_anchord == 0:
+                reason = ("no match evidence: no candidate had a resolvable anchor"
+                          if n_anchord == 0 else
                           "low confidence" if conf < AUTO_ACCEPT else
                           "ambiguous: two candidates score alike")
                 log.warning("%s: %s (conf=%.3f margin=%.3f). A mask is still "
@@ -859,14 +866,14 @@ def main() -> int:
         def reseed_at(frame_idx: int, _sid=sid) -> dict | None:
             """Re-detect the subject at one frame, for restarting a lost track.
 
-            Returns a box seed only if the best candidate clears the same identity
+            Returns a box seed only if the best candidate clears the same match
             bar used for auto-acceptance, so a lost track is never silently
-            resumed on the wrong person; a weaker match leaves the gap empty.
+            resumed on the wrong candidate; a weaker match leaves the gap empty.
             """
             im = Image.open(frames[frame_idx]).convert("RGB")
             found = None
             for thr in (args.detect_threshold, args.detect_threshold_min):
-                boxes = models.detect_people(im, threshold=thr)
+                boxes = models.detect_candidates(im, threshold=thr)
                 for b in boxes[:5]:
                     crop = im.crop(tuple(int(v) for v in b[:4]))
                     if crop.width < 12 or crop.height < 24:
@@ -935,7 +942,7 @@ def main() -> int:
             # the shot blocked forever with no way to unblock it.
             #
             # It does NOT stand in for approval: someone still has to look at the
-            # review sheet and confirm the mask follows the right figure for the
+            # review sheet and confirm the mask follows the right subject for the
             # whole shot, which is a different question from who to start from.
             shot["subject_status"] = "manual"
             shot.pop("subject_note", None)
@@ -1012,7 +1019,7 @@ def main() -> int:
         "shots": all_shots,
         "needs_user": all_needs,
         # Deliberate pass-through, not an open question: no one matching the
-        # identity bank appears in these shots, so there is nothing to regenerate.
+        # match bank appears in these shots, so there is nothing to regenerate.
         "subject_absent": sorted(sid for sid, s in merged.items()
                                  if s.get("status") == "subject_absent"),
     }, indent=2))

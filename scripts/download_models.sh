@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Download the local (1.3B) model profile into ComfyUI's model directories.
 #
-# Every file is verified by SHA256 against the value published by the Hugging Face
+# Every file is verified by SHA256 against the value published by the Hugging Anchor
 # API at the time this script was written. A size-only check is NOT sufficient, so
 # a checksum mismatch is a hard failure.
 #

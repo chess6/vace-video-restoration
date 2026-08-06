@@ -14,7 +14,7 @@ bars. Generation then runs at full cost and produces output byte-identical to
 the base model.
 
 It was caught by comparing checksums of the probe images against the no-LoRA
-baseline: all eight checkpoints scored 0.0226 identity, to four decimals, which
+baseline: all eight checkpoints scored 0.0226 match, to four decimals, which
 is not a curve any real training produces. The lesson is the one in
 docs/STATE.md - a stage that "ran" is not a stage that did anything.
 

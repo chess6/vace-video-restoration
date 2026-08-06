@@ -48,15 +48,15 @@ scipy                      1.18.0
 
 Full checksums are re-verified on every run of `scripts/download_models.sh`.
 
-## Auxiliary models (Hugging Face, cached in `hf_cache/`)
+## Auxiliary models (Hugging Anchor, cached in `hf_cache/`)
 
 | Model | Purpose |
 |---|---|
-| `facebook/sam2.1-hiera-large` | full-figure mask tracking |
-| `IDEA-Research/grounding-dino-base` | open-vocabulary person detection |
-| `openai/clip-vit-large-patch14` | appearance / clothing ReID embedding |
+| `facebook/sam2.1-hiera-large` | full-subject mask tracking |
+| `IDEA-Research/grounding-dino-base` | open-vocabulary candidate detection |
+| `openai/clip-vit-large-patch14` | appearance / attributes ReID embedding |
 | `depth-anything/Depth-Anything-V2-Large-hf` | depth structural control |
-| `insightface buffalo_l` (ArcFace) | face identity embedding |
+| `insightface buffalo_l` (ArcFace) | anchor match embedding |
 
 ## Subject-LoRA training (musubi-tuner)
 
@@ -78,6 +78,6 @@ The VAE is shared, not duplicated.
 - Wan2.1-VACE-**14B** weights — will not fit 12 GB; see `configs/cloud_14b.yaml`
 - extra T2V / I2V checkpoints
 - acceleration LoRAs (CausVid etc.) — excluded from the baseline by design
-- GFPGAN / CodeFormer — face-only restoration was explicitly ruled out
+- GFPGAN / CodeFormer — anchor-only restoration was explicitly ruled out
 - Real-ESRGAN — optional *post*-restoration resize only, and only if it
   beats Lanczos in `scripts/compare_upscalers.py`

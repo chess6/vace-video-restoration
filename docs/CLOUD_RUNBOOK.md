@@ -66,13 +66,13 @@ Only these. Everything else stays local.
 
 | | why it is needed |
 |---|---|
-| the exact five-second pilot interval | the only footage being restored |
-| identity-verified references | conditioning; excludes any image on the run's exclusion list |
+| the pilot interval, and only it | the only footage being restored |
+| match-verified references | conditioning; excludes any image on the run's exclusion list |
 | subject masks, depth, source-derived controls | regenerating them costs GPU and must reproduce bit-exactly |
 | the SeedVR2 conservative plate | reusable, expensive, and unchanged by any of the fixes |
 
 Not transferred: the full source video, unverified references, anything derived
-from the wrong-person track.
+from the wrong-candidate track.
 
 ### Gates before spending a generation
 
@@ -81,14 +81,14 @@ All of these are enforced in code, not by memory:
 - the tracking overlay has been reviewed by a human and approved —
   `scripts/approve_tracking.py`, bound to the mask's content hash;
 - `subject_status == needs_user` blocks generation outright;
-- clothing and any face covering are protected — `make_protected_mask.py` runs
-  before the reference pack, because the pack's face gating depends on its
+- attributes and any anchor covering are protected — `make_protected_mask.py` runs
+  before the reference pack, because the pack's anchor gating depends on its
   verdict and fails closed without it.
 
 **Not a gate, despite an earlier revision of this document saying so:** the run's
-exclusion list, `intermediate/reference_exclusions.txt`. `identity.load_exclusions`
+exclusion list, `intermediate/reference_exclusions.txt`. `match.load_exclusions`
 returns an empty set when the file is absent, and nothing anywhere requires it to
-be non-empty. Keeping a reference out of identity work is therefore a deliberate
+be non-empty. Keeping a reference out of match work is therefore a deliberate
 act with no reminder attached — an empty list means every image in
 `inputs/references/` is a candidate.
 
@@ -99,8 +99,8 @@ how a guard gets confirmed in the wrong direction.
 
 ### Order of generation
 
-1. **Corrected full-frame variant only.** Inspect the tracking overlay, the face
-   covering, sleeves, torso coverage and garment structure.
+1. **Corrected full-frame variant only.** Inspect the tracking overlay, the anchor
+   covering, extent coverage and attribute structure.
 2. **ROI only if that passes.** `--protected` refuses to combine with `--roi`:
    the submask is derived at full-frame geometry and re-warping it is not
    something to approximate.
@@ -117,9 +117,9 @@ file: SeedVR2 stays on 3B, and ROI is off.
 
 **Re-measure the protected-regenerable fraction at 720p before deciding whether
 VACE is worth running at all.** On the 240p source it was 1.57% of the tracked
-figure — about a 40x40 patch, with the plate supplying everything else. That
+subject — about a 40x40 patch, with the plate supplying everything else. That
 number is resolution-dependent: the parser is only confident where it has pixels,
-and at 720p the figure gains roughly 2.4x linear resolution. If it stays low, the
+and at 720p the subject gains roughly 2.4x linear resolution. If it stays low, the
 correct output for the shot is the restored plate alone, and no amount of GPU
 changes that.
 
@@ -139,7 +139,7 @@ only if more runs are planned; it bills separately and holds the weights, so
 deleting it means re-downloading them.
 
 `runpodctl` ships on the pod but is **not** authenticated — `runpodctl get pod`
-returns `API key not found` and `~/.runpod/config.toml` is a stub. Configure it
+returns `API key not found` and `~/.runpod/config.toml` is a stub. Consubject it
 from the pod's own injected key, over the proxy so the variable is in scope, and
 without ever echoing the value:
 
@@ -150,7 +150,7 @@ runpodctl remove pod "$RUNPOD_POD_ID"   # finished with it
 ```
 
 **Stop, don't remove, when the box is wanted again.** A stopped pod keeps its
-container and its SSH identity, so restarting it costs no re-setup, whereas a
+container and its SSH match, so restarting it costs no re-setup, whereas a
 removed pod means a new host, port and user, and reinstalling the public key in
 `/root/.ssh/authorized_keys`. Removing is right only when the work is finished.
 GPU billing stops either way; a stopped pod still bills a small amount for its

@@ -156,7 +156,7 @@ def main() -> int:
         warn.append(
             f"Non-square pixels (SAR {sar}). Storage AR {storage_ar:.3f} != display AR "
             f"{display_ar:.3f}. Normalization scales to square pixels at "
-            f"{display_w}x{h} before padding, so the figure is not stretched.")
+            f"{display_w}x{h} before padding, so the subject is not stretched.")
     if not astreams:
         warn.append("No audio stream. The assembly step will skip audio remuxing.")
     if info["video"]["rotation"]:

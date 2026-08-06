@@ -8,7 +8,7 @@ No models, no video, no CUDA.
 What it proves:
 
   * the foreground boundary is genuinely ONE-SIDED - no pixel outside the
-    occluder is ever dimmed, so the generated figure can never spread over
+    occluder is ever dimmed, so the generated subject can never spread over
     whoever is in front of it
   * the occluder's core stays fully opaque; only a narrow rim ramps
   * carrying part of the previous frame's alpha reduces the frame-to-frame
@@ -50,7 +50,7 @@ def test_one_sided(f: Failures) -> None:
     a = occluder_alpha(as_u8(occ), BAND)
 
     f.check(bool((a[~occ] == 1.0).all()),
-            "the foreground ramp dims pixels OUTSIDE the occluder; the figure "
+            "the foreground ramp dims pixels OUTSIDE the occluder; the subject "
             "would be blended over something in front of it")
 
     # A few pixels in from the silhouette the occluder must be fully opaque.
@@ -58,7 +58,7 @@ def test_one_sided(f: Failures) -> None:
     core = cv2.erode(occ.astype(np.uint8),
                      np.ones((2 * BAND + 3, 2 * BAND + 3), np.uint8)).astype(bool)
     f.check(bool((a[core] == 0.0).all()),
-            "the occluder core is not fully opaque; the figure shows through it")
+            "the occluder core is not fully opaque; the subject shows through it")
 
     ramp = (a > 0.0) & (a < 1.0)
     f.check(bool(ramp.any()), "no ramp at all - the edge is still fully hard")
@@ -73,7 +73,7 @@ def test_one_sided(f: Failures) -> None:
 def test_degenerate_cases(f: Failures) -> None:
     empty = np.zeros((60, 60), bool)
     f.check(bool((occluder_alpha(as_u8(empty), BAND) == 1.0).all()),
-            "with no occluder the figure must be untouched")
+            "with no occluder the subject must be untouched")
 
     occ = disc(size=60, cx=30, cy=30, r=12)
     hard = occluder_alpha(as_u8(occ), 0)
@@ -108,7 +108,7 @@ def test_smoothing_never_contradicts_the_current_frame(f: Failures) -> None:
 
     Two failures, both visible on screen: alpha trailing behind the occluder as
     a smear of transparency over background it has already left, and the old
-    alpha eating into the core it has just arrived in, so the generated figure
+    alpha eating into the core it has just arrived in, so the generated subject
     shows through a solid object. Neither may survive the blend.
     """
     import cv2
@@ -136,10 +136,10 @@ def test_smoothing_never_contradicts_the_current_frame(f: Failures) -> None:
 
     f.check(worst_trail == 0.0,
             f"alpha as low as {1 - worst_trail:.3f} trailed OUTSIDE the current "
-            f"occluder; the figure would fade over background it no longer covers")
+            f"occluder; the subject would fade over background it no longer covers")
     f.check(worst_hollow == 0.0,
             f"alpha rose to {worst_hollow:.3f} inside the current opaque core; "
-            f"the generated figure would show through a solid object")
+            f"the generated subject would show through a solid object")
     f.check(ramp_seen > 0,
             "the blend never altered the ramp, so this test proves nothing about "
             "smoothing - only that it is disabled")

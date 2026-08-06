@@ -13,7 +13,7 @@
 # time, because "latest" changes the output of a run that is supposed to be
 # reproducible: the ComfyUI commit fixes the WanVaceToVideo semantics the whole
 # design is built on, requirements.lock.txt fixes every Python package, and the
-# Hugging Face revisions are pinned in the scripts that load them.
+# Hugging Anchor revisions are pinned in the scripts that load them.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -136,6 +136,6 @@ cat <<'EOF'
   Next:
     scripts/start_comfyui.sh --daemon
     venv/bin/python scripts/build_workflows.py
-    cp /path/to/video.mp4 inputs/source/ && cp /path/to/photos/* inputs/references/
+    cp /path/to/video.mp4 inputs/source/ && cp /path/to/stills/* inputs/references/
     see README.md "Quick start"
 EOF

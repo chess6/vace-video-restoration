@@ -13,7 +13,7 @@
 # were not, because tracking is the one stage a human has to approve.
 #
 # WHAT IS WORTH CARRYING, AND WHAT IS NOT
-# Not the models: 24 GB that re-downloads from Hugging Face in minutes for free,
+# Not the models: 24 GB that re-downloads from Hugging Face in minutes for free,  # rule2a-ok: vendor name
 # already scripted in download_models.sh. Not the generated variants: they are
 # outputs, and re-running them is the cheap part. What matters is the small,
 # expensive, human-gated middle - masks, the protected submask, the manifest
@@ -50,6 +50,10 @@ PATHS=(
   intermediate/reference_exclusions.txt
   intermediate/inspection_allowlist.txt
   intermediate/lora_dataset
+  # The conditioning text. Small, untracked by design (rule 2a), and the thing
+  # that reproduces a recorded number - the tracked configs carry only a
+  # category-free default. Losing it with the box loses comparability.
+  configs/prompt.local.yaml
 )
 
 usage() { sed -n '2,30p' "$0"; exit 2; }

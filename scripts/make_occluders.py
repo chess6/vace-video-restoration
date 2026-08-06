@@ -2,25 +2,25 @@
 """Phase 8c - separate the things that must stay IN FRONT of the subject.
 
 The subject mask says what to regenerate. It says nothing about what is between
-the camera and the subject: another person crossing in front, a held object, a
-foreground limb. Regenerating the figure and compositing it straight onto the
+the camera and the subject: another candidate crossing in front, a held object, a
+foreground occluder. Regenerating the subject and compositing it onto the
 plate paints over all of those, which is what makes interactions read wrongly.
 
 This builds a second mask - the occluders - so compositing can use an explicit
 layer order:
 
     1. restored environment (the SeedVR2 plate)
-    2. the generated target figure
-    3. preserved foreground: occluders, held objects, other people
+    2. the generated target subject
+    3. preserved foreground: occluders, held objects, other candidates
 
 Occluders are taken from the ORIGINAL footage, never regenerated: they are not
 the subject, so there is no reason to synthesise them and every reason not to.
 
 It also answers the question the brief asks directly - whether mask dilation
-lets the regenerated figure spill over someone else. `grow` pixels of dilation
+lets the regenerated subject spill over someone else. `grow` pixels of dilation
 are applied to the subject mask, and the overlap with the occluder mask is
 measured and reported. A non-zero overlap is a real defect, not a rounding
-detail: it is the generated figure painting onto another person.
+detail: it is the generated subject painting onto another candidate.
 
     scripts/make_occluders.py [--pilot] [--shot shot0000]
 """
@@ -40,15 +40,15 @@ from common import (  # noqa: E402
     save_manifest, setup_logging,
 )
 
-# SegFormer clothes classes that indicate a PERSON (any person, not only ours).
-PERSON_IDS = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
+# SegFormer attributes classes that indicate a CANDIDATE (any candidate, not only ours).
+CANDIDATE_IDS = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
 
 # Depth Anything returns relative INVERSE depth, normalised per shot by
 # make_depth.py, so a brighter pixel is a NEARER one. Everything below depends on
 # that direction; it is stated here rather than buried in a comparison.
 NEARER_IS_BRIGHTER = True
 # How much nearer, in grey levels, an occluder must be before it is accepted as
-# being in front. Depth is a smooth estimate and the boundary between two people
+# being in front. Depth is a smooth estimate and the boundary between two candidates
 # is exactly where it is least certain, so a bare > would call noise an occlusion.
 DEPTH_MARGIN = 6.0
 
@@ -58,11 +58,12 @@ def verified_foreground(occ: np.ndarray, subj: np.ndarray,
     """The occluder pixels that are actually IN FRONT of the subject.
 
     Being near the subject in the image plane is not being in front of it. A
-    person standing a metre behind, or a doorway edge beside them, touches the
-    silhouette in 2D and occludes nothing. Counting those was overstating
-    occlusion, and the layering decision it feeds is about depth order.
+    candidate a metre behind the subject, or a static scene edge beside them,
+    touches the silhouette in 2D and occludes nothing. Counting those was
+    overstating occlusion, and the layering decision it feeds is about depth
+    order.
 
-    Each connected occluder component is tested on its own - one distant figure
+    Each connected occluder component is tested on its own - one distant subject
     must not disqualify a near one - by comparing its median depth against the
     depth of the subject pixels it touches. Components that are not nearer are
     dropped.
@@ -83,7 +84,7 @@ def verified_foreground(occ: np.ndarray, subj: np.ndarray,
         if comp.sum() < 16:
             continue
         # The subject pixels this component actually abuts - not the whole
-        # figure, whose far side may be at a completely different depth.
+        # subject, whose far side may be at a completely different depth.
         edge = subj & cv2.dilate(comp.astype(np.uint8), k).astype(bool)
         if edge.sum() < 16:
             continue
@@ -174,8 +175,8 @@ def main() -> int:
             subj = cv2.cvtColor(m, cv2.COLOR_BGR2GRAY) > 127
             rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
             labels = parser.parse(Image.fromarray(rgb))
-            people = np.isin(labels, list(PERSON_IDS))
-            # Anyone who is a person but not our tracked subject. Eroding the
+            candidates = np.isin(labels, list(CANDIDATE_IDS))
+            # Anyone who is a candidate but not our tracked subject. Eroding the
             # subject side slightly avoids labelling the subject's own outline
             # as an occluder purely from parser/tracker disagreement.
             # Occluders are defined against the subject at its TRUE extent, with
@@ -183,7 +184,7 @@ def main() -> int:
             # dilation test below tautological: it would be measuring the
             # overlap of a set with its own complement, which is empty whatever
             # the dilation radius is. That is the bug this replaces.
-            occ = people & ~subj
+            occ = candidates & ~subj
             occ = cv2.morphologyEx(occ.astype(np.uint8), cv2.MORPH_OPEN,
                                    np.ones((3, 3), np.uint8)).astype(bool)
 
@@ -198,16 +199,16 @@ def main() -> int:
             # How much of the SUBJECT is actually occluded on this frame?
             #
             # Measured as the weighted intersection between the alpha the
-            # generated figure would be composited with BEFORE any occluder is
+            # generated subject would be composited with BEFORE any occluder is
             # applied, and the depth-verified foreground. That is the quantity
-            # the layer exists to control: how much of the figure a real
+            # the layer exists to control: how much of the subject a real
             # foreground object takes away.
             #
             # The previous number counted occluder pixels inside a 9x9
             # neighbourhood of the mask and called the result subject-alpha
             # coverage. It was neither - it was proximity, unweighted and
-            # unverified, and it counted anything standing beside the subject as
-            # standing in front of them. Both are kept, named for what they are.
+            # unverified, and it counted anything beside the subject as being in
+            # front of it. Both are kept, named for what they are.
             depth_frame = None
             if dcap is not None:
                 okd, fd = dcap.read()
@@ -275,8 +276,8 @@ def main() -> int:
         if overlaps:
             if worst > 0.001:
                 log.warning("%s: DILATION OVERLAP - growing the subject mask by "
-                            "%d px reaches into another person/object on up to "
-                            "%.2f%% of its area. The generated figure would paint "
+                            "%d px reaches into another candidate/object on up to "
+                            "%.2f%% of its area. The generated subject would paint "
                             "over them; reduce mask.grow or rely on the occluder "
                             "layer.", sid, grow, 100 * worst)
             else:
@@ -302,7 +303,7 @@ def main() -> int:
                              "independent_masks": True}
     save_manifest(man)
     log.info("Occluder masks -> %s", rel(out_dir))
-    log.info("Composite order: plate, then generated figure, then these on top.")
+    log.info("Composite order: plate, then generated subject, then these on top.")
     return 0
 
 

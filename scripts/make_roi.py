@@ -1,22 +1,22 @@
 #!/usr/bin/env python
 """Phase 8b - a stabilized region-of-interest crop around the subject.
 
-Why this exists. At 320x240 the figure occupies a small fraction of the frame, so
-generating at 720x544 spends almost all of the model's capacity on background it
-was told to preserve. Cropping to the figure and scaling that crop up to the same
+Why this exists. The subject occupies a small fraction of the frame, so full-frame
+generation spends almost all of the model's capacity on background it
+was told to preserve. Cropping to the subject and scaling that crop up to the same
 generation size gives the subject several times as many pixels for identical
 compute. This is the main lever on "the quality improvement is too small".
 
-What the crop must contain, beyond the figure itself: hands, whatever the figure
-is touching, anyone it is interacting with, and its contact shadow. A crop that
-clips the hands or the person being spoken to removes exactly the evidence the
-model needs to get the interaction right.
+What the crop must contain, beyond the subject itself: its extremities, whatever it
+is in contact with, any candidate it is interacting with, and its contact shadow. A
+crop that clips an extremity or the candidate being interacted with removes exactly
+the evidence the model needs to get the interaction right.
 
 Stability matters as much as size. A box that follows the tracker frame by frame
 jitters, and a box that resizes frame by frame makes the subject pump in and out
 of scale. Both are worse than a slightly loose crop. The box here is therefore:
 
-  * union of the subject mask with any interacting people and contacted objects
+  * union of the subject mask with any interacting candidates and contacted objects
   * expanded by a context margin
   * grown to a FIXED aspect ratio matching the generation canvas
   * smoothed over time with a zero-phase filter, so it neither leads nor lags
@@ -65,7 +65,7 @@ def smooth_series(v: np.ndarray, win: int) -> np.ndarray:
     """Zero-phase moving average: smooths without shifting the box in time.
 
     A causal filter would make the crop lag the subject, which reads as the
-    figure drifting inside the frame.
+    subject drifting inside the frame.
     """
     if win <= 1 or len(v) < 3:
         return v
@@ -104,18 +104,19 @@ def plan_roi(boxes: list, W: int, H: int, out_w: int, out_h: int, cfg: dict,
     bh = arr[:, 3] - arr[:, 1]
 
     # One scale for the whole shot. Use a high percentile of subject height, not
-    # the max, so a single frame with an outstretched arm cannot shrink every
+    # the max, so a single frame with an outstretched extremity cannot shrink every
     # other frame; then check the largest frame still fits.
     target_frac = float(r["target_height_fraction"])
     margin = 1.0 + float(r["context_margin"])
     keep = float(r.get("containment_percentile", 95))
-    # Percentiles, not max. A single frame with an outstretched arm or a
+    # Percentiles, not max. A single frame with an outstretched extremity or a
     # momentarily loose mask would otherwise force the crop out to the full
     # frame and destroy the entire point of the exercise. Frames beyond this
     # percentile lose a little at the edges, which costs less than no zoom.
     # Occupancy is measured on whichever axis the subject actually extends
     # along, not on height. "Fill 78% of the crop's HEIGHT" silently assumes an
-    # upright figure; a reclining one is wide and short, so height-based sizing
+    # upright subject; one whose dominant extent is horizontal is wide and short,
+    # so height-based sizing
     # asks for a crop far tighter than its own width and the planner then has to
     # give the zoom straight back. Sizing on the dominant extent asks the same
     # question - how much of the frame should the subject occupy - in a way that
@@ -139,7 +140,7 @@ def plan_roi(boxes: list, W: int, H: int, out_w: int, out_h: int, cfg: dict,
     win = int(r["smooth_frames"])
     cx_s = smooth_series(cx, win)
     cy_s = smooth_series(cy, win)
-    # Bias the box upwards a little: heads carry identity, feet rarely do.
+    # Bias the box upwards a little: the anchor carries match, the far end rarely does.
     cy_s = cy_s - ch * float(r.get("vertical_bias", 0.0))
 
     xs = np.clip(np.round(cx_s - cw / 2), 0, W - cw).astype(int)
@@ -162,7 +163,7 @@ def plan_roi(boxes: list, W: int, H: int, out_w: int, out_h: int, cfg: dict,
              100 * float(r.get("target_height_fraction_max", target_frac)))
     if occupancy < 0.3:
         log.warning("Subject fills only %.0f%% of the crop. The mask may be "
-                    "loose, or the figure genuinely small in frame.", 100 * occupancy)
+                    "loose, or the subject genuinely small in frame.", 100 * occupancy)
     if scale < float(r.get("min_useful_scale", 1.15)):
         log.warning("ROI scale is only %.2fx. The subject already fills much of "
                     "the frame here, so cropping buys almost no extra resolution "
@@ -175,7 +176,7 @@ def plan_roi(boxes: list, W: int, H: int, out_w: int, out_h: int, cfg: dict,
     # ---- context preservation test ------------------------------------------
     # The zoom is only legitimate if the crop still contains what the model needs
     # to understand the action. Measure, per frame, the fraction of the subject
-    # box that falls outside the crop; a hand or a contacted object leaving the
+    # box that falls outside the crop; an extremity or a contacted object leaving the
     # frame is a harder failure than a slightly softer image.
     clipped = []
     for i, b in enumerate(filled):

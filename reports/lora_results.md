@@ -6,22 +6,22 @@ Phase 5c–5e. Trainer: musubi-tuner, pinned in `versions.md`. One GPU.
 
 ## What was trained
 
-Nine head crops, taken around the face `identity.resolve_targets` verified in
-each reference photograph — never the largest face, which in a group shot is a
-stranger. Head crops rather than the greyed panels `make_reference_pack.py`
-builds: greying the wardrobe is right for conditioning, where the model sees the
-panel once, but a LoRA would meet a flat grey field in every image and learn
-that this person arrives with a grey background. Cropping excludes the wardrobe
-by framing instead, so the authority split holds with nothing artificial to
-learn.
+Tight anchor crops, taken around the anchor `match.resolve_targets` verified in
+each external reference — never the largest anchor, which in a group shot is a
+non-target. Tight crops rather than the greyed panels `make_reference_pack.py`
+builds: greying the attributes out is right for conditioning, where the model
+sees the panel once, but a LoRA would meet a flat grey field in every image and
+learn that this candidate arrives with a grey background. Cropping excludes the
+attributes by framing instead, so the authority split holds with nothing
+artificial to learn.
 
-Of the verified photographs, three sat just below the default crop floor and one
-far below it. The floor was lowered to recover the three near misses — nine
-training images instead of six is worth more here than the small amount of
-upscaling it costs — and the fourth stayed out.
+A few verified references sat just below the default crop floor and one far below
+it. The floor was lowered to recover the near misses — the extra training images
+are worth more here than the small amount of upscaling they cost — and the one
+far below stayed out.
 
-**Three images were held out and never trained on.** The identity bank is built
-from these same photographs, so scoring a LoRA against the whole bank returns a
+**A held-out split was reserved and never trained on.** The match bank is built
+from these same references, so scoring a LoRA against the whole bank returns a
 good number whatever it learned. That is the self-comparison trap in
 `docs/STATE.md`, and without a reserved split the question is unfalsifiable.
 
@@ -32,25 +32,25 @@ shapes, and VACE only adds its own blocks. `verify_lora_loads.py` then puts the
 trained file through ComfyUI's own mapper against the real checkpoint: **300 of
 300 modules bind**.
 
-## How identity was measured
+## How match was measured
 
 Each checkpoint generates four probe images from the base T2V model — no VACE,
-no plate, no mask — and the face in each is scored against a bank built from the
-**held-out photographs alone**. Two more rows make the middle one readable:
+no plate, no mask — and the anchor in each is scored against a bank built from the
+**held-out references alone**. Two more rows make the middle one readable:
 
-- **Ceiling** — the training crops' own verified faces against the held-out
-  bank. Real photographs of the same person, no generation involved. This is
-  what "as good as a photograph" is worth on this metric.
+- **Ceiling** — the training crops' own verified anchors against the held-out
+  bank. Real references of the same candidate, no generation involved. This is
+  what "as good as a real reference" is worth on this metric.
 - **Baseline** — the same prompt and seeds with no LoRA. Without it a similarity
-  of 0.3 says nothing: the base model also produces a person.
+  of 0.3 says nothing: the base model also produces a candidate.
 
-`identity.py` treats **0.35** as the threshold for a plausible match.
+`reference_match.py` treats **0.35** as the threshold for a plausible match.
 
 ## Results
 
-| checkpoint | steps | identity vs held-out | vs train bank (invalid) |
+| checkpoint | steps | match vs held-out | vs train bank (invalid) |
 |---|---|---|---|
-| ceiling — real photographs | – | **0.7454** | – |
+| ceiling — real references | – | **0.7454** | – |
 | baseline, no LoRA | – | 0.0226 | 0.0336 |
 | v1 | 180 | 0.0305 | 0.0814 |
 | v1 | 360 | 0.1442 | 0.1574 |
@@ -66,8 +66,8 @@ no plate, no mask — and the face in each is scored against a bank built from t
 
 Monotone apart from one dip within seed noise, clearing the 0.35 threshold from
 about 900 steps, and **still climbing at 2520** — roughly 70% of the way to what
-a real photograph scores. Training was stopped there rather than at a measured
-peak; the metric sees identity, not the memorised framing that overfitting would
+a held-out reference scores. Training was stopped there rather than at a measured
+peak; the metric sees match, not the memorised framing that overfitting would
 also produce, so "keep going until it turns over" is not a safe rule.
 
 The last column is what scoring against the training images would have reported.
@@ -96,7 +96,7 @@ Three runs of the pilot chunk, protected path, identical in every respect except
 the LoRA — the control config extends the treatment config, so the prompt, seed,
 sampler, geometry and reference pack cannot have drifted. All three scored
 against the held-out bank, with each frame cropped to the tracked subject before
-face detection so the other person in the shot cannot be scored by mistake.
+anchor detection so the other candidate in the shot cannot be scored by mistake.
 
 The first three ran **without `--background`**, so their preserved 95.58% was the
 original frame rather than a restored plate. The run log asserted "comes from the
@@ -108,7 +108,7 @@ the quality matched the source, which is exactly what it was.
 **Repeated on the plate, the verdict is identical.** Two more arms, same configs,
 `--background background_aggressive`:
 
-| arm | LoRA | plate | identity vs held-out |
+| arm | LoRA | plate | match vs held-out |
 |---|---|---|---|
 | loraE | none | aggressive | **0.2015** |
 | loraD | strength 1.0 | aggressive | **0.1769** |
@@ -117,34 +117,34 @@ the quality matched the source, which is exactly what it was.
 
 Still no improvement, still the wrong way round, on the path that actually ships.
 The plate lifts both arms by about 0.03 — restoring the surroundings helps the
-face a little — and the LoRA costs about 0.02 in both pairs. So the earlier
+anchor a little — and the LoRA costs about 0.02 in both pairs. So the earlier
 conclusion holds without the caveat it was carrying.
 
-| arm | LoRA | identity vs held-out | frames with a face |
+| arm | LoRA | match vs held-out | frames with an anchor |
 |---|---|---|---|
 | control | none | **0.1682** | 14/16 |
 | treatment | strength 1.0 | **0.1612** | 14/16 |
 | strong | strength 2.0 | **0.1263** | 11/16 |
 
 **No improvement at strength 1.0** — the difference is the wrong way round and
-within noise. At strength 2.0 identity is clearly *worse*, and a face was
+within noise. At strength 2.0 match is clearly *worse*, and an anchor was
 detectable in three fewer frames, which is what a damaged region looks like
 rather than a differently-identified one.
 
 That second arm is what makes this conclusive. A LoRA that scores 0.5167 on
 direct probes and 0.16 through the pipeline could mean its influence is too
 weak to survive the path; doubling it would then have helped. It did not. **The
-protected path leaves no room for an identity prior.** VACE regenerates 4.42% of
-the figure, and every pixel of it is pinned by the control video and ringed by
-plate; there is not enough free signal for a face prior to express itself, and
+protected path leaves no room for an match prior.** VACE regenerates 4.42% of
+the subject, and every pixel of it is pinned by the control video and ringed by
+plate; there is not enough free signal for an anchor prior to express itself, and
 pushing harder degrades what is there.
 
 This is consistent with, and independent of, what the 1.3B pilot already found:
-the plate beats every VACE variant on this shot, identity included.
+the plate beats every VACE variant on this shot, match included.
 
 **So a subject LoRA does not rescue VACE 1.3B here.** What it does establish is
-that the *dataset and identity plumbing work*: the LoRA learned this person's
-face from nine crops well enough to reproduce them at 70% of a photograph's
+that the *dataset and match plumbing work*: the LoRA learned this candidate's
+anchor from a handful of crops well enough to reproduce them at 70% of a real reference's
 score. If VACE is ever given a larger region to regenerate, or a larger model at
 a size where its output beats the plate, the LoRA is ready and the harness to
 judge it exists.
@@ -195,11 +195,11 @@ bounding box, which is twenty times the mask and mostly plate:
 **In the region it exists to improve, VACE is within noise of upscaling the
 source with Lanczos.** The plate had already restored those pixels by +70%;
 VACE discards that and returns something no sharper than the original. The
-background looks restored because it is plate, and the face does not because it
+background looks restored because it is plate, and the anchor does not because it
 is not — which is what the user reported before any of this was measured:
 "as if I'm watching the same original clip".
 
-Note the middle row. A bounding box around the head reports +120% and would have
+Note the middle row. A bounding box around the anchor reports +120% and would have
 been read as VACE working. It is measuring the plate.
 
 `scripts/compare_720p.py` produces this table, the 100% crops and the
@@ -240,7 +240,7 @@ less. 3B aggressive is the plate to ship.
 
 ## VACE-14B: the last lever, and it goes the wrong way
 
-One pass on the same five-second interval, same masks, same approved track, same
+One pass on the same pilot interval, same masks, same approved track, same
 3B plate underneath, same prompt and seed. The only change from the control arm
 is the checkpoint — `configs/cloud_720p_14b.yaml` extends that arm rather than
 `cloud_14b.yaml`, whose 1280x720 geometry would have invalidated every asset and
@@ -266,14 +266,14 @@ as plausible but undemonstrated. About $1.30 including the 33 GB download.
 **This closes the question.** VACE does not earn its place on this footage at any
 size worth renting, and no subject LoRA changes that, because the constraint was
 never model capacity — it is that the protected path regenerates 4.44% of the
-figure under a control video that pins every pixel of it. The deliverable is the
+subject under a control video that pins every pixel of it. The deliverable is the
 plate.
 
 ## Cost
 
 | | |
 |---|---|
-| dataset export | ~1 min, CPU-bound face resolution |
+| dataset export | ~1 min, CPU-bound anchor resolution |
 | training, 1260 steps | 12 min at ~1.7 it/s |
 | training, 2520 steps | 25 min |
 | probe generation + scoring | ~20 s per image, ~1 min to score a set |
@@ -287,14 +287,14 @@ consistency check exist.
 
 - Two of the four pipeline arms carried **no restored plate**; the plate-backed
   pair is the one that represents the shipped path.
-- Identity here is measured on **probe generations from a portrait prompt**,
-  head-on and well lit, which is the friendliest possible case. It says the LoRA
-  learned the face; it does not say what happens inside the pipeline, where VACE
-  regenerates a small head region over a plate.
-- Three held-out photographs is a thin bank. It is the right bank — the only
-  uncontaminated one available — but three images cannot characterise a face
+- Match here is measured on **probe generations from a tightly framed prompt**,
+  square-on and well lit, which is the friendliest possible case. It says the LoRA
+  learned the anchor; it does not say what happens inside the pipeline, where VACE
+  regenerates a small anchor region over a plate.
+- The held-out split is a thin bank. It is the right bank — the only
+  uncontaminated one available — but three images cannot characterise an anchor
   across pose and lighting.
-- Nine training images at one framing. Expect the LoRA to carry that framing's
+- A handful of training images at one framing. Expect the LoRA to carry that framing's
   lighting and scale with it.
 - The trigger token is load-bearing: the captions were the token and nothing
   else. A config that enables the LoRA without putting the token in

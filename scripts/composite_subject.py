@@ -13,7 +13,7 @@ The second of the two integration paths:
               edge to manage.
 
 The edge is deliberately narrow. A wide alpha ramp is what produces halos and
-the pasted-on look around hair and clothing, so the ramp is a few pixels wide and
+the pasted-on look around the subject's outline and its attributes, so the ramp is a few pixels wide and
 is centred on the silhouette (eroded by half the band before ramping) rather than
 grown outwards from it. Feathering happens exactly once on each path: the
 workflow's FeatherMask for in_vace, this band for composite - never both.
@@ -61,19 +61,19 @@ def alpha_from_mask(mask_u8: np.ndarray, band_px: int, center: bool) -> np.ndarr
 
 
 def occluder_alpha(occ_u8: np.ndarray, band_px: int) -> np.ndarray:
-    """How much of the generated figure survives where something is in front.
+    """How much of the generated subject survives where something is in front.
 
     Returns 1 away from the occluder, 0 in its opaque core, and a ramp between -
     laid ONE-SIDED, entirely inside the occluder. That direction matters. A
     symmetric ramp would spread half its width outwards, blending generated
-    figure over pixels that belong to whoever is actually in front, which is the
+    subject over pixels that belong to whoever is actually in front, which is the
     same over-painting the occluder layer exists to prevent. Growing it inwards
-    can only ever lose a sliver of occluder to the figure, never the reverse.
+    can only ever lose a sliver of occluder to the subject, never the reverse.
 
     A fully hard edge was the previous behaviour. It is correct about ownership
     but reads as a cut-out, because the tracked boundary lands on a different
     pixel each frame; a couple of pixels of ramp absorbs that jitter without
-    giving the figure any ground.
+    giving the subject any ground.
     """
     import cv2
     occ = occ_u8 > 127
@@ -97,7 +97,7 @@ def stabilize_occluder_alpha(cur: np.ndarray, prev: np.ndarray | None,
     A plain temporal blend is wrong in two ways that both show on screen. Where
     an occluder has moved on, the old alpha trails behind it as a smear of
     transparency over background it no longer covers. Where it has just arrived,
-    the old alpha eats into its core and the generated figure shows through a
+    the old alpha eats into its core and the generated subject shows through a
     solid object.
 
     So the blend is confined to the current frame's ramp. Outside the current
@@ -121,13 +121,13 @@ def composite(subject: Path, background: Path, mask: Path, out: Path,
     """Per-frame alpha composite, in explicit layer order. Streams to disk.
 
         1. restored environment (background plate)
-        2. generated target figure
-        3. preserved foreground: occluders, held objects, other people
+        2. generated target subject
+        3. preserved foreground: occluders, held objects, other candidates
 
     Layer 3 is taken from the plate, never regenerated: the occluder's own pixels
     are the RESTORED original, so they get SeedVR2's detail without ever passing
-    through VACE. Without this layer the figure is pasted over anyone crossing in
-    front of it, which reads as broken interaction however good the figure looks.
+    through VACE. Without this layer the subject is pasted over anyone crossing in
+    front of it, which reads as broken interaction however good the subject looks.
     """
     import cv2
     import subprocess
@@ -229,7 +229,7 @@ def main() -> int:
                          "from VACE and the rest stays the plate.")
     ap.add_argument("--band-px", type=int, default=None)
     ap.add_argument("--occluders", type=Path, default=None,
-                    help="Foreground mask kept ABOVE the generated figure. "
+                    help="Foreground mask kept ABOVE the generated subject. "
                          "Defaults to the shot's occluder mask when it exists.")
     ap.add_argument("--redo", action="store_true",
                     help="Re-composite even when the composite key still matches")
@@ -248,9 +248,9 @@ def main() -> int:
         return 1
     # The alpha source must match what VACE was actually allowed to regenerate.
     # After a --protected run that is the protected submask, NOT the full subject
-    # mask: compositing on the subject mask takes the whole figure from the VACE
-    # output, so the garment arrives as a VAE round-trip of the plate rather than
-    # the plate itself. Measured on the 720p pilot, gradient in the garment
+    # mask: compositing on the subject mask takes the whole subject from the VACE
+    # output, so the attribute arrives as a VAE round-trip of the plate rather than
+    # the plate itself. Measured on the 720p pilot, gradient in the attribute
     # region: plate 1.837, subject-mask composite 1.690 (-8.0%), protected-submask
     # composite 1.850 (parity).
     mask = Path(args.mask).resolve() if args.mask else P.root / c["mask_path"]
@@ -277,7 +277,7 @@ def main() -> int:
         cand = P.root / rec["path"] if rec.get("path") else None
         occ = cand if cand and cand.exists() else None
     if occ is not None:
-        log.info("Foreground layer: %s kept above the generated figure", rel(occ))
+        log.info("Foreground layer: %s kept above the generated subject", rel(occ))
     settings = {"band_px": band, "center_band": bool(comp.get("center_band", True)),
                 "occluder_band_px": int(comp.get("occluder_band_px", 2)),
                 "occluder_temporal_smooth": float(

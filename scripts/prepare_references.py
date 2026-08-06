@@ -14,11 +14,11 @@ What it does:
   * reads PNG / JPEG / WebP (and BMP/TIFF), never modifying the originals
   * applies EXIF orientation
   * rejects corrupt, tiny, and duplicate images (perceptual hash)
-  * detects people and faces, embeds faces, and clusters them so that photos of
-    OTHER people are dropped instead of contaminating the reference
-  * classifies each usable image as face / upper / full-body / detail view
+  * detects candidates and anchors, embeds anchors, and clusters them so that references of
+    OTHER candidates are dropped instead of contaminating the reference
+  * classifies each usable image as anchor / upper / full-extent / detail view
   * scores by sharpness, subject coverage and resolution, and picks up to 3
-    complementary views (prefers: one full body, one face, one alternate angle)
+    complementary views (prefers: one full extent, one anchor, one alternate angle)
   * composites a clean sheet: no captions, no watermarks, no borders, minimal
     empty space (panels are cover-cropped, not letterboxed)
   * writes a separate contact sheet for inspection, and a JSON provenance record
@@ -38,9 +38,11 @@ import numpy as np
 from PIL import Image, ImageOps
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import IMAGE_EXTS, P, load_config, load_manifest, setup_logging  # noqa: E402
+from common import (  # noqa: E402
+    IMAGE_EXTS, P, load_config, load_manifest, prompt_overlay, setup_logging,
+)
 
-MIN_SIDE = 256          # below this a reference adds noise, not identity
+MIN_SIDE = 256          # below this a reference adds noise, not match
 MIN_SHARPNESS = 12.0    # Laplacian variance on the subject crop
 
 
@@ -82,10 +84,10 @@ def sharpness(im: Image.Image) -> float:
 
 
 # ---------------------------------------------------------------------------
-# detection / identity
+# detection / match
 # ---------------------------------------------------------------------------
 
-def get_face_app(log):
+def get_anchor_app(log):
     try:
         from insightface.app import FaceAnalysis
         import onnxruntime as ort
@@ -94,16 +96,16 @@ def get_face_app(log):
                      else ["CPUExecutionProvider"])
         app = FaceAnalysis(name="buffalo_l", providers=providers)
         app.prepare(ctx_id=0 if "CUDA" in providers[0] else -1, det_size=(640, 640))
-        log.info("Face analysis: insightface buffalo_l (%s)", providers[0])
+        log.info("Anchor analysis: insightface buffalo_l (%s)", providers[0])
         return app
     except Exception as e:
-        log.warning("insightface unavailable (%s). Falling back to person-box "
-                    "heuristics only; identity clustering will be skipped.", e)
+        log.warning("insightface unavailable (%s). Falling back to candidate-box "
+                    "heuristics only; match clustering will be skipped.", e)
         return None
 
 
-def detect_person_boxes(images: list[Image.Image], log) -> list[list[tuple]]:
-    """Open-vocabulary person detection with Grounding DINO.
+def detect_candidate_boxes(images: list[Image.Image], log) -> list[list[tuple]]:
+    """Open-vocabulary candidate detection with Grounding DINO.
 
     Returns, per image, a list of (x0, y0, x1, y1, score).
     """
@@ -121,7 +123,9 @@ def detect_person_boxes(images: list[Image.Image], log) -> list[list[tuple]]:
     out: list[list[tuple]] = []
     with torch.inference_mode():
         for im in images:
-            inputs = proc(images=im, text="a person. a human. a man. a woman.",
+            # The class phrase is a detector input that necessarily names what the
+            # subject is, so it lives in the untracked overlay - common.py::prompt_overlay.
+            inputs = proc(images=im, text=prompt_overlay("detect_prompt"),
                           return_tensors="pt").to(dev)
             res = model(**inputs)
             post = proc.post_process_grounded_object_detection(
@@ -136,20 +140,20 @@ def detect_person_boxes(images: list[Image.Image], log) -> list[list[tuple]]:
     return out
 
 
-def classify_view(box: tuple | None, face_box: tuple | None, im: Image.Image) -> str:
+def classify_view(box: tuple | None, anchor_box: tuple | None, im: Image.Image) -> str:
     W, H = im.size
     if box is None:
         return "detail"
     bw, bh = box[2] - box[0], box[3] - box[1]
     cover_h = bh / H
-    if face_box is not None:
-        fh = face_box[3] - face_box[1]
+    if anchor_box is not None:
+        fh = anchor_box[3] - anchor_box[1]
         if fh / max(bh, 1) > 0.45:
-            return "face"
+            return "anchor"
     if cover_h > 0.80 and bh / max(bw, 1) > 1.7:
-        return "full_body"
+        return "full_extent"
     if cover_h > 0.55:
-        return "upper_body"
+        return "upper_extent"
     return "detail"
 
 
@@ -216,7 +220,7 @@ def layout_panels(n: int, W: int, H: int) -> list[tuple[int, int, int, int]]:
     if n == 2:
         half = W // 2
         return [(0, 0, half, H), (half, 0, W - half, H)]
-    # 3: a tall primary panel (full body) on the left, two stacked on the right
+    # 3: a tall primary panel (full extent) on the left, two stacked on the right
     left = int(W * 0.5)
     top_h = H // 2
     return [(0, 0, left, H), (left, 0, W - left, top_h), (left, top_h, W - left, H - top_h)]
@@ -230,8 +234,8 @@ def main() -> int:
     ap.add_argument("--config", default=None)
     ap.add_argument("--refs-dir", type=Path, default=None)
     ap.add_argument("--max-refs", type=int, default=3)
-    ap.add_argument("--identity-threshold", type=float, default=0.28,
-                    help="Cosine similarity below which a face is treated as a different person")
+    ap.add_argument("--match-threshold", type=float, default=0.28,
+                    help="Cosine similarity below which an anchor is treated as a different candidate")
     ap.add_argument("--no-detect", action="store_true",
                     help="Skip Grounding DINO (faster; uses whole-image panels)")
     ap.add_argument("--verbose", action="store_true")
@@ -299,64 +303,64 @@ def main() -> int:
         kept.append(r)
     log.info("%d image(s) after duplicate removal", len(kept))
 
-    # ---- person detection ----------------------------------------------------
+    # ---- candidate detection ----------------------------------------------------
     if args.no_detect:
         for r in kept:
             r["box"] = None
     else:
         try:
-            boxes = detect_person_boxes([r["im"] for r in kept], log)
+            boxes = detect_candidate_boxes([r["im"] for r in kept], log)
             for r, bs in zip(kept, boxes):
                 r["boxes"] = bs
                 r["box"] = bs[0] if bs else None
-                r["n_people"] = len(bs)
+                r["n_candidates"] = len(bs)
                 if len(bs) > 1:
-                    log.warning("%s contains %d detected people. Only the largest "
+                    log.warning("%s contains %d detected candidates. Only the largest "
                                 "is used; verify the contact sheet.", r["path"].name, len(bs))
         except Exception as e:
             log.warning("Detection failed (%s); using whole-image panels.", e)
             for r in kept:
                 r["box"] = None
 
-    # ---- face embedding + identity clustering -------------------------------
-    app = get_face_app(log)
+    # ---- anchor embedding + match clustering -------------------------------
+    app = get_anchor_app(log)
     if app is not None:
         import cv2
         for r in kept:
             bgr = cv2.cvtColor(np.asarray(r["im"]), cv2.COLOR_RGB2BGR)
-            faces = app.get(bgr)
-            if faces:
-                f = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
-                r["face_box"] = tuple(float(v) for v in f.bbox)
+            anchors = app.get(bgr)
+            if anchors:
+                f = max(anchors, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
+                r["anchor_box"] = tuple(float(v) for v in f.bbox)
                 emb = np.asarray(f.normed_embedding, dtype=np.float32)
-                r["face_emb"] = emb
+                r["anchor_emb"] = emb
             else:
-                r["face_box"] = None
-                r["face_emb"] = None
+                r["anchor_box"] = None
+                r["anchor_emb"] = None
 
-        embs = [r for r in kept if r.get("face_emb") is not None]
+        embs = [r for r in kept if r.get("anchor_emb") is not None]
         if len(embs) >= 2:
-            # dominant identity = the face most similar to all the others
-            M = np.stack([r["face_emb"] for r in embs])
+            # dominant match = the anchor most similar to all the others
+            M = np.stack([r["anchor_emb"] for r in embs])
             sim = M @ M.T
             medoid = int(np.argmax(sim.sum(axis=1)))
             ref_emb = M[medoid]
             for r in embs:
-                r["id_sim"] = float(ref_emb @ r["face_emb"])
-            outliers = [r for r in embs if r["id_sim"] < args.identity_threshold]
+                r["id_sim"] = float(ref_emb @ r["anchor_emb"])
+            outliers = [r for r in embs if r["id_sim"] < args.match_threshold]
             for r in outliers:
-                log.warning("REJECT %s: face similarity %.3f to the dominant identity "
-                            "is below %.2f - this looks like a different person.",
-                            r["path"].name, r["id_sim"], args.identity_threshold)
+                log.warning("REJECT %s: anchor similarity %.3f to the dominant match "
+                            "is below %.2f - this looks like a different candidate.",
+                            r["path"].name, r["id_sim"], args.match_threshold)
             kept = [r for r in kept if r not in outliers]
-            log.info("Identity clustering: dominant face from %s, %d image(s) kept",
+            log.info("Match clustering: dominant anchor from %s, %d image(s) kept",
                      embs[medoid]["path"].name, len(kept))
         else:
-            log.info("Fewer than 2 faces detected; skipping identity clustering.")
+            log.info("Fewer than 2 anchors detected; skipping match clustering.")
     else:
         for r in kept:
-            r["face_box"] = None
-            r["face_emb"] = None
+            r["anchor_box"] = None
+            r["anchor_emb"] = None
 
     if not kept:
         log.error("All reference images were rejected.")
@@ -364,7 +368,7 @@ def main() -> int:
 
     # ---- classify + score ----------------------------------------------------
     for r in kept:
-        r["view"] = classify_view(r.get("box"), r.get("face_box"), r["im"])
+        r["view"] = classify_view(r.get("box"), r.get("anchor_box"), r["im"])
         cover = 1.0
         if r.get("box"):
             b = r["box"]
@@ -380,10 +384,11 @@ def main() -> int:
                         r["path"].name, r["sharp"])
 
     # ---- pick up to N complementary views ------------------------------------
-    # Priority order deliberately covers body first: the brief says non-facial
-    # identity (clothing, silhouette, accessories) matters as much as the face.
+    # Priority order deliberately covers extent first: the brief says match away
+    # from the anchor (attributes, silhouette, accessories) matters as much as the
+    # anchor itself.
     selected: list[dict] = []
-    for want in ("full_body", "face", "upper_body", "detail"):
+    for want in ("full_extent", "anchor", "upper_extent", "detail"):
         pool = [r for r in kept if r["view"] == want and r not in selected]
         if pool and len(selected) < args.max_refs:
             selected.append(max(pool, key=lambda r: r["score"]))
@@ -392,8 +397,8 @@ def main() -> int:
             break
         if r not in selected:
             selected.append(r)
-    # primary panel should be the most body-revealing view
-    order = {"full_body": 0, "upper_body": 1, "face": 2, "detail": 3}
+    # primary panel should be the most extent-revealing view
+    order = {"full_extent": 0, "upper_extent": 1, "anchor": 2, "detail": 3}
     selected.sort(key=lambda r: (order.get(r["view"], 9), -r["score"]))
     log.info("Selected %d view(s): %s", len(selected),
              ", ".join(f"{r['path'].name}({r['view']})" for r in selected))
@@ -403,8 +408,8 @@ def main() -> int:
     sheet = Image.new("RGB", (W, H), (0, 0, 0))
     panels = layout_panels(len(selected), W, H)
     for r, (px, py, pw, ph) in zip(selected, panels):
-        # For a face view, prefer the face box so the panel is not mostly torso.
-        box = r.get("face_box") if r["view"] == "face" and r.get("face_box") else r.get("box")
+        # For an anchor view, prefer the anchor box so the panel is not mostly extent.
+        box = r.get("anchor_box") if r["view"] == "anchor" and r.get("anchor_box") else r.get("box")
         sheet.paste(cover_crop(r["im"], box, pw, ph), (px, py))
 
     sheet_path = P.reference_sheets / "reference_sheet.png"
@@ -439,8 +444,8 @@ def main() -> int:
         "selected": [{
             "file": str(r["path"]), "view": r["view"], "score": round(r["score"], 4),
             "sharpness": round(r["sharp"], 2), "size": [r["w"], r["h"]],
-            "person_box": r.get("box"), "face_box": r.get("face_box"),
-            "identity_similarity": round(r["id_sim"], 4) if "id_sim" in r else None,
+            "candidate_box": r.get("box"), "anchor_box": r.get("anchor_box"),
+            "match_similarity": round(r["id_sim"], 4) if "id_sim" in r else None,
         } for r in selected],
         "considered": [str(r["path"]) for r in kept],
         "rejected_note": "See logs/prepare_references.log for per-file rejection reasons.",

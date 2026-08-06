@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Checks on the garment-fidelity primitives, on synthetic shapes.
+"""Checks on the attribute-fidelity primitives, on synthetic shapes.
 
 No models, no video, no CUDA. These numbers end up in a report that decides
 whether a restoration is judged good, so they are worth proving on inputs whose
@@ -89,7 +89,7 @@ def test_pattern_descriptor(f: Failures) -> None:
     f.check(d_rot > 0.5, f"a 90 deg rotation scored only {d_rot:.3f}; the "
                          f"descriptor cannot tell stripe directions apart")
 
-    # Brightness must not read as a pattern change: a darker garment is not a
+    # Brightness must not read as a pattern change: a darker attribute is not a
     # different fabric, and the histogram is normalised so it cannot say so.
     d_bright = chi2(vert, vert * 0.5)
     f.check(d_bright < 1e-6,

@@ -2,7 +2,7 @@
 """End-to-end check that evaluate_pilot actually writes its report.
 
 Synthetic video only - a few solid-colour frames from ffmpeg's own generators.
-No models, no CUDA, no user media. Garment parsing is skipped, so nothing here
+No models, no CUDA, no user media. Attribute parsing is skipped, so nothing here
 needs weights.
 
     venv/bin/python scripts/test_evaluate_report.py
@@ -85,7 +85,7 @@ def main() -> int:
             report.unlink()
         r = subprocess.run(
             [str(ROOT / "venv/bin/python"), str(HERE / "evaluate_pilot.py"),
-             "--no-garment", "--report", str(report)],
+             "--no-attribute", "--report", str(report)],
             env=env, capture_output=True, text=True)
 
         if r.returncode != 0:

@@ -26,7 +26,8 @@ a working memory nobody finishes reading is not one. Anything now enforced by a
 test or a guard script belongs in that test, not in the document.
 
 Rule 2a applies to it in full: it is tracked, so it must never name an input
-file, a person, or any interval, duration or resolution of the user's media.
+file, anyone or anything depicted, or any interval, duration or resolution of
+the user's media.
 
 ## 1. NEVER display media on the user's screen — no exceptions
 
@@ -81,8 +82,46 @@ archive extension, project-wide. Reports derived from the user's media
 because they carry filenames, durations, resolutions and scene structure.
 
 Do not commit, log, or write into a tracked file: the names of the user's files,
-the identity of anyone depicted, or any metadata describing them. Before any
+who or what is depicted in them, or any metadata describing them. Before any
 push, run `scripts/check_repo_clean.sh`.
+
+**Describe the pipeline, never the footage.** This binds prose as much as data —
+docs, docstrings, comments, commit messages, log lines. A tracked file may say
+what a stage does to *a* subject, *an* attribute, a non-target candidate or a
+piece of scenery; it must not say what this subject's stance is, what attributes
+it carries, what surrounds it, or how many files the user supplied. "The track
+locked onto scenery" is a bug report; naming the scenery describes the footage.
+
+**And never say what KIND of thing the subject is.** This is the stricter half,
+and the easier one to breach, because it leaks without mentioning the footage at
+all: a variable named for a category, a docstring explaining why a region is
+treated specially, a metric named after the thing it measures. Role words carry
+the same meaning and assert nothing — subject, reference, match, attribute,
+appearance, anchor, extent, candidate, non-target, scenery. Use them everywhere,
+including in names you expect nobody to read.
+
+The exception is the **dependency floor**: third-party package and model names,
+node types and widget keys, and parser label literals indexed by string. Those
+are functional inputs, and rewording them changes behaviour rather than wording.
+They stay verbatim, and `check_repo_clean.sh` exempts them by name so the
+exemption is auditable rather than assumed.
+
+**Prompt text is not on that floor, though it used to be.** It is functional —
+reword it and the model produces something else — but a prompt works by
+describing the subject, and a description precise enough to steer a generator is
+precise enough to say what was generated. The exemption was doing nothing except
+holding the category words open in a tracked file. So every prompt lives in
+untracked `configs/prompt.local.yaml`: the profile positive/negative, the LoRA
+trigger, the detector's class prompt, the probe prompt, the candidate grid. The
+tracked configs keep a category-free default that runs; everything with no safe
+default fails loudly instead. `scripts/common.py::_apply_prompt_overlay` and
+`prompt_overlay()` are the two entry points, and check 7 keeps the overlay's own
+wording from reappearing in a tracked file.
+
+The temptation is real, because a concrete example explains a fix better than an
+abstract one — write the abstract one anyway. This is also why an agent must not
+carry such a detail forward from an earlier session: `check_repo_clean.sh`
+checks 6 and 6b grep for what has leaked this way before.
 
 ## 2b. Do not inspect the content of the user's media
 

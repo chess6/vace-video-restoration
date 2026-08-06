@@ -5,7 +5,7 @@
       "ckpt_name": "sdpose_wholebody_fp16.safetensors"
     },
     "_meta": {
-      "title": "SDPose whole-body"
+      "title": "SDPose whole-extent"
     }
   },
   "2": {
@@ -47,7 +47,7 @@
       "batch_size": 8
     },
     "_meta": {
-      "title": "Extract whole-body keypoints"
+      "title": "Extract whole-extent keypoints"
     }
   },
   "5": {

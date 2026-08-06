@@ -8,10 +8,10 @@
 # stage is the one producing essentially all of this pipeline's measured gain.
 #
 # Two 7B fp8 variants exist and are the same size. `sharp` is a distinct release,
-# not a setting - worth comparing, since unresolved fine facial detail is the
+# not a setting - worth comparing, since unresolved fine anchor detail is the
 # open complaint about the 3B plate.
 #
-# Same contract as download_models.sh: SHA256 from the Hugging Face API, hard
+# Same contract as download_models.sh: SHA256 from the Hugging Anchor API, hard
 # failure on mismatch, resumable, skips files already verified.
 set -uo pipefail
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,7 +21,7 @@ BASE="https://huggingface.co/$REPO/resolve/main"
 
 mkdir -p "$MODELS/diffusion_models" "$MODELS/vae"
 
-# Optional Hugging Face read token, for anonymous rate limiting. Read from the
+# Optional Hugging Anchor read token, for anonymous rate limiting. Read from the
 # environment or ~/.hf_token so the value is never an argument (arguments are
 # visible in `ps` to every user on the box) and never lands in this repo.
 # Measured here: the first 7 GB file pulled in ~2 minutes anonymously, the next
@@ -33,7 +33,7 @@ fi
 AUTH=()
 if [ -n "$HF_TOKEN" ]; then
   AUTH=(-H "Authorization: Bearer $HF_TOKEN")
-  echo "using a Hugging Face token (${#HF_TOKEN} chars, value not shown)"
+  echo "using a Hugging Anchor token (${#HF_TOKEN} chars, value not shown)"
 else
   echo "no HF token found; downloading anonymously (subject to rate limiting)"
 fi
@@ -51,7 +51,7 @@ FILES=(
 "vae|seedvr2_ema_vae_fp16.safetensors|vae/seedvr2_ema_vae_fp16.safetensors|20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1|501324814"
 )
 
-# Opt-in with --7b. Sizes and SHA256 read from the Hugging Face API, not guessed.
+# Opt-in with --7b. Sizes and SHA256 read from the Hugging Anchor API, not guessed.
 FILES_7B=(
 "diffusion_models|seedvr2_7b_fp8_e4m3fn.safetensors|diffusion_models/seedvr2_7b_fp8_e4m3fn.safetensors|5065e77d647dd553d9090a81e20d6de590d931a61df79d785e008433926ee418|8240979248"
 "diffusion_models|seedvr2_7b_sharp_fp8_e4m3fn.safetensors|diffusion_models/seedvr2_7b_sharp_fp8_e4m3fn.safetensors|7602c5f70868d28e7730035e4e9d745b05d661c8f0a7eb758e63f9c8603596ef|8240979248"

@@ -41,16 +41,16 @@ NOTES = {
         "upscaled to 720p with Lanczos, the SeedVR2 plate, VACE on that plate, "
         "and VACE with the LoRA. Measured over the pixels VACE actually "
         "regenerates, the plate is +70% sharper than the Lanczos upscale and "
-        "VACE is +3.8% - i.e. indistinguishable from it. That is why the face "
-        "looks unrestored while the rest of the frame does not.",
+        "VACE is +3.8% - i.e. indistinguishable from it. That is why the anchor "
+        "region looks unrestored while the rest of the frame does not.",
     "compare/compare_720p_head/plate_7B_vs_lanczos_720p_h264.mp4":
         "The plate against the default upscale, side by side at native "
         "resolution. This is the comparison that decides whether the pipeline "
         "is worth running at all.",
     "compare/compare_720p_head/vace_plate_LoRA_vs_lanczos_720p_h264.mp4":
-        "VACE+LoRA against the default upscale. Watch the face specifically: "
-        "the background is plate and looks restored, the head is regenerated "
-        "and does not.",
+        "VACE+LoRA against the default upscale. Watch the anchor specifically: "
+        "the background is plate and looks restored, the anchor region is "
+        "regenerated and does not.",
     "lora/plate_background_aggressive.mp4":
         "START HERE. The SeedVR2 plate alone, no VACE. This is where the quality "
         "comes from: +231% sharpness over the source, against +167% for the VACE "
@@ -60,7 +60,7 @@ NOTES = {
         "VACE on the plate, NO LoRA. The honest comparison for loraD.",
     "lora/shot0000_c000_loraD.mp4":
         "VACE on the plate, WITH the subject LoRA. Same run as loraE in every "
-        "other respect. Measured 0.177 identity against photographs the LoRA "
+        "other respect. Measured 0.177 match against references the LoRA "
         "never saw, versus 0.202 without it - no improvement. Your eye is the "
         "discriminator: if you can tell D from E, the metric is wrong.",
     "lora/shot0000_c000_loraB.mp4":
@@ -70,30 +70,30 @@ NOTES = {
     "lora/shot0000_c000_loraA.mp4":
         "Earlier arm, no plate, with LoRA. Same caveat as loraB.",
     "lora/shot0000_c000_loraC.mp4":
-        "The same LoRA at strength 2.0. Measured WORSE (0.126) and a face was "
+        "The same LoRA at strength 2.0. Measured WORSE (0.126) and an anchor was "
         "detectable in fewer frames, which usually means the region is being "
-        "damaged. Look for a waxy or smeared face rather than a different one.",
-    "lora/identity_scores.json":
-        "Identity per training checkpoint, scored against the three held-out "
-        "photographs only. This is where the LoRA does work: 0.023 with no "
-        "LoRA, 0.517 at the shipped checkpoint, 0.745 for real photographs.",
-    "lora/vace_identity.json":
+        "damaged. Look for a waxy or smeared anchor rather than a different one.",
+    "lora/match_scores.json":
+        "Match per training checkpoint, scored against the held-out references "
+        "only. This is where the LoRA does work: 0.023 with no LoRA, 0.517 at the "
+        "shipped checkpoint, 0.745 for the held-out references themselves.",
+    "lora/vace_match.json":
         "The same measurement on the three clips above. This is where it "
         "stops working.",
     "pilot_grid.mp4":
         "START HERE. All variants side by side, same frames. Scan for: which "
-        "environment looks like the same place; whether the figure looks pasted "
-        "on; any rim or glow along the figure's edge.",
+        "environment looks like the same place; whether the subject looks pasted "
+        "on; any rim or glow along the subject's edge.",
     "variants/lanczos_original.mp4":
         "The baseline. Everything else has to beat this to be worth its runtime.",
     "variants/seedvr2_conservative.mp4":
         "Background restoration alone, fidelity-first. Check signage, text and "
-        "any distant faces against the baseline - those are where invented "
+        "any distant anchors against the baseline - those are where invented "
         "detail does real damage.",
     "variants/seedvr2_aggressive.mp4":
         "Background restoration alone, detail-first. Measured as the least "
         "temporally stable and the most inventive variant. Compare its signage "
-        "and distant faces to the conservative one before trusting it.",
+        "and distant anchors to the conservative one before trusting it.",
     "variants/vace_over_original.mp4":
         "Subject replacement with NO background stage. Measured as the only "
         "variant steadier than its own source. If the environment does not "
@@ -110,19 +110,20 @@ NOTES = {
         "Same subject composited onto the aggressive plate. Best measured "
         "sharpness balance of any variant, but the most invented detail.",
     "masks/":
-        "Tracking review sheets. Does the red region cover the WHOLE figure - "
-        "hair, hands, feet, bag - and nothing else? If it caught the wrong "
-        "person, every subject judgement below is meaningless.",
+        "Tracking review sheets. Does the red region cover the WHOLE subject - "
+        "its full extent, its extremities, anything carried - and nothing else? "
+        "If it caught the wrong candidate, every subject judgement below is "
+        "meaningless.",
     "references/shot0000_reference_pack.png":
         "THE image VACE is actually conditioned on for this shot. Three panels: "
-        "an identity view, the garment taken from this interval's own footage, "
-        "and an alternate head angle. The two external panels must show face, "
-        "hair and skin on flat grey - if you can see clothing in either of "
-        "them, the garment authority has leaked and everything below is void.",
+        "a match view, the attribute taken from this interval's own footage, and "
+        "an alternate anchor orientation. The two external panels must show the "
+        "anchor region on flat grey - if you can see attributes in either of "
+        "them, the attribute authority has leaked and everything below is void.",
     "references/shot0000_pack.json":
-        "Provenance for that image: which photographs, why they were chosen, "
-        "their identity agreement, and the measured colour distance between "
-        "their clothes and this interval's. That distance is a diagnostic only.",
+        "Provenance for that image: which references, why they were chosen, "
+        "their match agreement, and the measured colour distance between "
+        "their attributes and this interval's. That distance is a diagnostic only.",
     "references/reference_sheet.png":
         "The older GLOBAL sheet, kept only as a fallback for shots without a "
         "pack. If a pack exists above, judge that instead - this one may "
@@ -211,7 +212,7 @@ def main() -> int:
         # ---- stills that need judging ----------------------------------------
         # The PER-SHOT packs first. These are what actually conditions the
         # generation, and the only artefact that shows whether the external
-        # clothing was really stripped. The global sheet below is a fallback and
+        # attributes was really stripped. The global sheet below is a fallback and
         # is often older than the pack, so shipping it alone invites the reviewer
         # to check the wrong image.
         pack_dir = P.intermediate / "reference_packs"
@@ -241,8 +242,8 @@ def main() -> int:
             arc = f"lora/{v.name}"
             sz = add_video(zf, v, arc, tmp, args.crf, args.lossless, log)
             included.append((arc, sz))
-        for j in ("identity_scores.json", "vace_identity.json",
-                  "vace_identity_plate.json"):
+        for j in ("match_scores.json", "vace_match.json",
+                  "vace_match_plate.json"):
             p = P.intermediate / "lora_eval" / j
             if p.exists():
                 zf.write(p, f"lora/{j}")

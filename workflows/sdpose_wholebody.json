@@ -48,7 +48,7 @@
       "widgets_values": [
         "sdpose_wholebody_fp16.safetensors"
       ],
-      "title": "SDPose whole-body"
+      "title": "SDPose whole-extent"
     },
     {
       "id": 2,
@@ -193,7 +193,7 @@
       "widgets_values": [
         8
       ],
-      "title": "Extract whole-body keypoints"
+      "title": "Extract whole-extent keypoints"
     },
     {
       "id": 5,
@@ -390,7 +390,7 @@
   "groups": [],
   "config": {},
   "extra": {
-    "note": "SDPose whole-body (body + hands + face) control video for VACE"
+    "note": "SDPose whole-extent (extent + hands + anchor) control video for VACE"
   },
   "version": 0.4
 }

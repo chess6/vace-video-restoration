@@ -80,21 +80,28 @@ mask:
   grow: 6
   polarity: white_is_regenerate
 
-# Prompts are intentionally identical to local_1p3b.yaml so the only variable
-# between the local pilot and cloud production is model capacity and resolution.
+# Conditioning text. Intentionally identical to local_1p3b.yaml, so the only
+# variable between the local pilot and cloud production is model capacity and
+# resolution - and the overlay below reaches both profiles alike.
+#
+# A category-free default: it runs, and it says nothing about what is being
+# restored. The wording actually used is overlaid at load time from the untracked
+# configs/prompt.local.yaml - common.py::_apply_prompt_overlay says why a
+# functional input is withheld anyway. Reproducing a recorded number needs the
+# overlay that produced it; this default will not reproduce it.
 prompt:
   positive: >-
-    the same person, identical face and facial features, identical hairstyle and hair colour,
-    identical clothing with the same garments, colours, patterns, textures and accessories,
-    consistent body proportions and silhouette, natural skin texture and fabric detail,
-    sharp accurate detail, following the original pose, motion, lighting direction and
-    camera perspective, matching the surrounding scene
+    the same subject, identical appearance, identical attributes in the same colours,
+    patterns, textures and accessories, consistent proportions and silhouette,
+    natural surface texture and material detail, sharp accurate detail, following the
+    original motion, lighting direction and camera perspective, matching the
+    surrounding scene
   negative: >-
-    different person, face swap, changed identity, changed clothing, changed colours,
-    redesigned outfit, new background, altered scene, extra limbs, extra fingers,
-    deformed hands, distorted anatomy, duplicated body parts, warping, morphing,
-    flickering, ghosting, blurry, low quality, jpeg artifacts, oversaturated,
-    cartoon, anime, painting, illustration, text, watermark, caption, logo, border
+    a different subject, substituted appearance, altered attributes, changed colours,
+    redesigned attributes, new background, altered scene, duplicated or malformed
+    structure, warping, morphing, flickering, ghosting, blurry, low quality,
+    jpeg artifacts, oversaturated, cartoon, anime, painting, illustration, text,
+    watermark, caption, logo, border
 
 # ---------------------------------------------------------------------------
 # Stages added after this profile was first written. All UNVERIFIED at 720p:
@@ -108,7 +115,7 @@ background:
   # 3B fp16 - it is the configuration whose OUTPUT has actually been inspected
   # locally, so it is the one whose failure modes are known. Move to 7B only
   # after a side-by-side on the rented box, not on the assumption that bigger is
-  # better: more capacity also means more invented signage and distant faces.
+  # better: more capacity also means more invented signage and distant anchors.
   model: seedvr2_3b_fp16.safetensors
   vae: seedvr2_ema_vae_fp16.safetensors
   weight_dtype: default          # no fp8 needed at 48 GB
@@ -128,7 +135,7 @@ background:
       color_correction: lab
       description: >-
         Prioritises structural and temporal fidelity. Least likely to invent
-        detail, alter signage or mutate distant faces.
+        detail, alter signage or mutate distant anchors.
     background_aggressive:
       steps: 25
       cfg: 1.0
@@ -136,12 +143,12 @@ background:
       color_correction: wavelet
       description: >-
         Reconstructs stronger plausible environmental detail. Expect more
-        invented texture, and check signage and distant faces before trusting it.
+        invented texture, and check signage and distant anchors before trusting it.
 
 roi:
   # Off by default at 720p, and this is a real decision rather than an oversight.
   # The ROI pass exists to buy subject resolution the model would not otherwise
-  # get. At 1280x720 with 14B the figure already receives far more pixels than
+  # get. At 1280x720 with 14B the subject already receives far more pixels than
   # the local 720x544 pass could give it, so the crop mostly costs context and
   # adds a warp/unwarp round trip. Turn it on only if a measured pilot on the
   # rented box shows the subject still under-resolved.
@@ -176,7 +183,7 @@ pose:
   draw_feet: true
   draw_head: true
   stick_width: 6                 # scaled with resolution
-  face_point_size: 5
+  anchor_point_size: 5
   score_threshold: 0.3
 
 output:

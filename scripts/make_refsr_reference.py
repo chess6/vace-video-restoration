@@ -4,28 +4,30 @@
 A reference-based super-resolution model transfers REAL texture from a reference
 image into a low-resolution frame. It does that by finding correspondences
 between the two, so the reference has to resemble the frame in the ways the
-matcher cares about: head pose, scale, and roughly the framing. The seventeen
-photographs in this project were chosen for identity evidence, not for that -
-they are a different outfit, different lighting and whatever pose the camera
-caught. Handing a matcher an angled portrait to align against a 23-pixel
-side-on face is how RefSR quietly degrades to plain single-image SR.
+matcher cares about: the anchor's orientation, its scale, and roughly the
+framing. The references in this project were chosen for match evidence, not for
+that - they are a different appearance, different lighting and whatever angle the
+camera caught. Handing a matcher a steeply angled reference to align against a
+turned-away anchor a few dozen pixels across is how RefSR quietly degrades to
+plain single-image SR.
 
-So this picks, per target frame, the reference whose head pose is closest, and
-re-crops it to that frame's head geometry:
+So this picks, per target frame, the reference whose anchor orientation is
+closest, and re-crops it to that frame's anchor geometry:
 
-  * yaw from 5-point landmarks, exactly as make_reference_pack.py measures it,
-    so "closest pose" means the same thing in both places;
-  * scale normalised by inter-ocular distance, times the SR factor, so the
-    reference carries the detail the model is being asked to synthesise rather
-    than being upsampled itself;
-  * ties broken by face pixel count - between two equally-posed references the
-    one with more real detail wins.
+  * orientation from the detector's 5-point keypoints, exactly as
+    make_reference_pack.py measures it, so "closest" means the same thing in both
+    places;
+  * scale normalised by the keypoint span, times the SR factor, so the reference
+    carries the detail the model is being asked to synthesise rather than being
+    upsampled itself;
+  * ties broken by anchor pixel count - between two equally oriented references
+    the one with more real detail wins.
 
-It selects on IDENTITY-verified references only (identity.resolve_targets, run
-exclusions honoured), because a reference of the wrong person would transfer
-that person's texture into the frame, which is worse than transferring nothing.
+It selects on MATCH-verified references only (match.resolve_targets, run
+exclusions honoured), because a reference of the wrong candidate would transfer
+that candidate's texture into the frame, which is worse than transferring nothing.
 
-Rule 2b: this reads pixels to measure pose and crop, which is what the automated
+Rule 2b: this reads pixels to measure orientation and crop, which is what the automated
 stages already do. It reports geometry and scores, never what is depicted, and
 writes every artefact to disk (rule 1).
 
@@ -44,28 +46,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import P, setup_logging  # noqa: E402
 
 
-def eye_distance(kps) -> float:
-    """Inter-ocular distance in pixels; the scale a face matcher aligns on."""
+def keypoint_span(kps) -> float:
+    """Span of the symmetric keypoint pair, in pixels.
+
+    This is the scale an anchor matcher aligns on - a fixed distance on the
+    subject, so it measures the anchor rather than the crop.
+    """
     if kps is None or len(kps) < 2:
         return 0.0
     return float(np.linalg.norm(np.asarray(kps[0]) - np.asarray(kps[1])))
 
 
-def head_crop(im, kps, box, out_eye_px: float, margin: float = 2.6):
-    """Crop around the head and scale so the eyes sit `out_eye_px` apart.
+def anchor_crop(im, kps, box, out_span_px: float, margin: float = 2.6):
+    """Crop around the anchor and scale so its keypoint span is `out_span_px`.
 
-    Normalising on the eyes rather than the box makes the reference's detail
+    Normalising on the span rather than the box makes the reference's detail
     directly comparable to the target's: at scale 4 the reference carries four
-    times the pixels per face feature, which is the only reason it can supply
+    times the pixels per anchor feature, which is the only reason it can supply
     anything the frame does not already have.
     """
     from PIL import Image
-    eye = eye_distance(kps)
-    if eye <= 1:
+    span = keypoint_span(kps)
+    if span <= 1:
         return None, 0.0
     cx = float(np.mean([p[0] for p in kps[:2]]))
     cy = float(np.mean([p[1] for p in kps[:2]]))
-    half = eye * margin
+    half = span * margin
     L, T = int(round(cx - half)), int(round(cy - half))
     R, B = int(round(cx + half)), int(round(cy + half))
     L, T = max(0, L), max(0, T)
@@ -73,7 +79,7 @@ def head_crop(im, kps, box, out_eye_px: float, margin: float = 2.6):
     if R - L < 16 or B - T < 16:
         return None, 0.0
     crop = im.crop((L, T, R, B))
-    factor = out_eye_px / eye
+    factor = out_span_px / span
     if factor <= 0:
         return None, 0.0
     w, h = max(16, round(crop.width * factor)), max(16, round(crop.height * factor))
@@ -93,7 +99,7 @@ def main() -> int:
                     help="Comma-separated frame indices to build references for")
     ap.add_argument("--scale", type=float, default=4.0,
                     help="SR factor: the reference is built at this multiple of "
-                         "the target's face scale")
+                         "the target's anchor scale")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
@@ -102,33 +108,33 @@ def main() -> int:
     import cv2
     from PIL import Image, ImageOps
     import track_subject as T
-    from identity import load_exclusions, reference_files, resolve_targets
-    from make_reference_pack import face_detail, face_yaw
+    from reference_match import load_exclusions, reference_files, resolve_targets
+    from make_reference_pack import anchor_detail, anchor_orientation
 
     models = T.Models(log)
     res = resolve_targets(reference_files(), models, log, load_exclusions(log))
     per = res.get("per_image") or {}
     if not per:
-        log.error("No identity-verified reference. Refusing to build a RefSR "
-                  "reference from an unverified face.")
+        log.error("No match-verified reference. Refusing to build a RefSR "
+                  "reference from an unverified anchor.")
         return 1
 
-    # Measure every candidate once: pose, scale, and how much real detail it has.
+    # Measure every candidate once: orientation, scale, and how much real detail it has.
     cands = []
     for name, v in per.items():
         f = Path(v["file"])
         im = ImageOps.exif_transpose(Image.open(f)).convert("RGB")
-        emb, kps, frac = face_detail(models, im)
+        emb, kps, frac = anchor_detail(models, im)
         if kps is None:
             continue
         cands.append({"name": name, "im": im, "kps": kps,
-                      "yaw": face_yaw(kps), "eye": eye_distance(kps),
-                      "face_px": int(v.get("face_pixels") or 0),
+                      "orientation": anchor_orientation(kps), "span": keypoint_span(kps),
+                      "anchor_px": int(v.get("anchor_pixels") or 0),
                       "agreement": float(v.get("agreement") or 0.0)})
     if not cands:
-        log.error("No verified reference yielded landmarks.")
+        log.error("No verified reference yielded anchor keypoints.")
         return 1
-    log.info("%d verified reference(s) measured for pose and scale", len(cands))
+    log.info("%d verified reference(s) measured for orientation and scale", len(cands))
 
     out = args.out or (P.intermediate / "refsr_references")
     out.mkdir(parents=True, exist_ok=True)
@@ -152,38 +158,38 @@ def main() -> int:
             continue
         rgb = cv2.cvtColor(frames[idx], cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb)
-        emb, kps, frac = face_detail(models, pil)
+        emb, kps, frac = anchor_detail(models, pil)
         if kps is None:
-            log.warning("frame %d: no face found, so there is nothing to match "
+            log.warning("frame %d: no anchor found, so there is nothing to match "
                         "a reference against; skipped", idx)
             continue
-        t_yaw, t_eye = face_yaw(kps), eye_distance(kps)
+        t_turn, t_span = anchor_orientation(kps), keypoint_span(kps)
 
-        # Closest pose wins; more real detail breaks the tie.
+        # Closest orientation wins; more real detail breaks the tie.
         def cost(c):
-            dy = abs((c["yaw"] or 0.0) - (t_yaw or 0.0))
-            return (round(dy, 2), -c["face_px"])
+            dy = abs((c["orientation"] or 0.0) - (t_turn or 0.0))
+            return (round(dy, 2), -c["anchor_px"])
         best = sorted(cands, key=cost)[0]
-        want_eye = t_eye * args.scale
-        crop, factor = head_crop(best["im"], best["kps"], None, want_eye)
+        want_span = t_span * args.scale
+        crop, factor = anchor_crop(best["im"], best["kps"], None, want_span)
         if crop is None:
             log.warning("frame %d: %s could not be cropped", idx, best["name"])
             continue
         dst = out / f"ref_frame{idx:04d}.png"
         crop.save(dst)
         rec = {"frame": idx, "reference": best["name"],
-               "target_yaw": round(float(t_yaw or 0), 3),
-               "reference_yaw": round(float(best["yaw"] or 0), 3),
-               "target_eye_px": round(t_eye, 1),
-               "reference_eye_px": round(best["eye"], 1),
+               "target_turn": round(float(t_turn or 0), 3),
+               "reference_orientation": round(float(best["orientation"] or 0), 3),
+               "target_span_px": round(t_span, 1),
+               "reference_span_px": round(best["span"], 1),
                "scale_applied": round(factor, 3),
                "reference_upsampled": bool(factor > 1.0),
                "agreement": round(best["agreement"], 4),
                "crop_px": list(crop.size), "path": str(dst)}
         manifest["pairs"].append(rec)
-        log.info("frame %4d  <- %-30s yaw %+0.2f vs %+0.2f | eyes %.0f -> %.0f px "
-                 "| x%.2f%s", idx, best["name"], t_yaw or 0, best["yaw"] or 0,
-                 t_eye, want_eye, factor,
+        log.info("frame %4d  <- %-30s turn %+0.2f vs %+0.2f | span %.0f -> %.0f px "
+                 "| x%.2f%s", idx, best["name"], t_turn or 0, best["orientation"] or 0,
+                 t_span, want_span, factor,
                  "  UPSAMPLED (reference has less detail than asked for)"
                  if factor > 1.0 else "")
 

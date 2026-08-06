@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Record that a human has looked at a tracked figure and confirmed who it is.
+"""Record that a human has looked at a tracked subject and confirmed who it is.
 
 Generation refuses to start without this. That is deliberate: an automatic
-track once ran at 0.72 confidence, flagged nothing, and was the wrong person -
+track once ran at 0.72 confidence, flagged nothing, and was the wrong candidate -
 and four variants and about an hour of GPU time were spent on it before anyone
-looked. No confidence score can settle "is this the right person"; only someone
+looked. No confidence score can settle "is this the right candidate"; only someone
 who knows them can.
 
 The approval is bound to the mask's CONTENT, not to the shot name. Re-tracking
@@ -89,7 +89,7 @@ def main() -> int:
             if s.get("subject_status") in ("needs_user", "failed"):
                 log.warning("%s: status is %r. Approving overrides an automatic "
                             "flag - only do this if the review sheet really "
-                            "shows the right person.", s["shot_id"],
+                            "shows the right candidate.", s["shot_id"],
                             s.get("subject_status"))
             s["tracking_approved"] = {
                 "at": time.strftime("%Y-%m-%dT%H:%M:%S"),

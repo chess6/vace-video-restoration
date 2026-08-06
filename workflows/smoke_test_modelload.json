@@ -145,7 +145,7 @@
         "cnr_id": "comfy-core"
       },
       "widgets_values": [
-        "the same person, identical face and facial features, identical hairstyle and hair colour, identical clothing with the same garments, colours, patterns, textures and accessories, consistent body proportions and silhouette, natural skin texture and fabric detail, sharp accurate detail, following the original pose, motion, lighting direction and camera perspective, matching the surrounding scene"
+        "the same subject, identical appearance, identical attributes in the same colours, patterns, textures and accessories, consistent proportions and silhouette, natural surface texture and material detail, sharp accurate detail, following the original motion, lighting direction and camera perspective, matching the surrounding scene"
       ],
       "title": "Positive prompt"
     },
@@ -185,7 +185,7 @@
         "cnr_id": "comfy-core"
       },
       "widgets_values": [
-        "different person, face swap, changed identity, changed clothing, changed colours, redesigned outfit, new background, altered scene, extra limbs, extra fingers, deformed hands, distorted anatomy, duplicated body parts, warping, morphing, flickering, ghosting, blurry, low quality, jpeg artifacts, oversaturated, cartoon, anime, painting, illustration, text, watermark, caption, logo, border"
+        "a different subject, substituted appearance, altered attributes, changed colours, redesigned attributes, new background, altered scene, duplicated or malformed structure, warping, morphing, flickering, ghosting, blurry, low quality, jpeg artifacts, oversaturated, cartoon, anime, painting, illustration, text, watermark, caption, logo, border"
       ],
       "title": "Negative prompt"
     },

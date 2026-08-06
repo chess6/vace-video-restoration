@@ -38,6 +38,14 @@ inputs/**
 !inputs/source/README.md
 !inputs/references/README.md
 
+# ---- Conditioning text: never committed --------------------------------------
+# The prompt that reaches the text encoder describes the subject in order to work,
+# and a description precise enough to condition a model is precise enough to
+# identify what was conditioned. The tracked configs carry a category-free default
+# that runs; the wording actually used lives here, untracked, and load_config
+# overlays it. Same for the LoRA trigger token, which is a name by construction.
+configs/prompt.local.yaml
+
 # Archives dropped anywhere in the project
 *.zip
 *.tar

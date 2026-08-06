@@ -6,7 +6,7 @@
 # detection, 4n+1 chunking, depth, SAM 2 tracking, mask export, VACE generation,
 # chunk assembly, audio remux and A/V sync verification.
 #
-# What it does NOT prove: identity matching. A synthetic humanoid is not a person,
+# What it does NOT prove: match matching. A synthetic humanoid is not a candidate,
 # so Grounding DINO / ArcFace matching cannot be judged on it. That stage is
 # exercised here with a manual seed, and is validated for real when you supply
 # actual references. This limitation is stated in the report rather than hidden.
@@ -142,16 +142,16 @@ step "make_depth.py" "$PY" "$PROJ/scripts/make_depth.py"
 check_file "full depth video" "$PROJ/intermediate/depth/full_depth.mkv"
 
 # ---- 6. tracking --------------------------------------------------------------
-# Manual seed: a synthetic humanoid is not a person, so automatic identity
+# Manual seed: a synthetic humanoid is not a candidate, so automatic match
 # matching is not meaningful here. SAM 2 propagation and mask export ARE.
 # Every shot must be tracked, otherwise a pilot landing on an untracked shot has
-# no mask. The synthetic figure restarts on the left after the cut, so the same
+# no mask. The synthetic subject restarts on the left after the cut, so the same
 # relative box seeds both shots.
 BOX=$("$PY" - "$MANIFEST" <<'PYEOF'
 import json, sys
 m = json.load(open(sys.argv[1]))
 w, h = m["normalized"]["width"], m["normalized"]["height"]
-# the figure starts near the left, centred vertically around 0.62*H
+# the subject starts near the left, centred vertically around 0.62*H
 print(f"{int(w*0.06)},{int(h*0.28)},{int(w*0.34)},{int(h*0.92)}")
 PYEOF
 )
@@ -302,10 +302,10 @@ else echo "    FAIL: expected exit 3, got $rc"
   echo
   echo "**Not** proven by this run, and only testable with your real footage:"
   echo
-  echo "- identity matching quality (Grounding DINO + ArcFace + CLIP ReID)."
-  echo "  A synthetic humanoid is not a person; this run seeds SAM 2 manually."
-  echo "- restoration quality: whether VACE preserves your subject's face,"
-  echo "  clothing and proportions convincingly. That is what the real pilot"
+  echo "- match matching quality (Grounding DINO + ArcFace + CLIP ReID)."
+  echo "  A synthetic humanoid is not a candidate; this run seeds SAM 2 manually."
+  echo "- restoration quality: whether VACE preserves your subject's anchor,"
+  echo "  attributes and proportions convincingly. That is what the real pilot"
   echo "  and reports/pilot_results.md are for."
   echo
   echo "Full log: \`logs/selftest.log\`"

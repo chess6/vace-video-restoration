@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Phase 5e - generate a probe set per LoRA checkpoint, then score identity.
+# Phase 5e - generate a probe set per LoRA checkpoint, then score match.
 #
 # WHY GENERATE AT ALL, RATHER THAN INSPECT THE WEIGHTS
 # A LoRA that loads, is finite and is non-zero has proven nothing about whose
-# face it learned. The only question worth asking is whether the model, prompted
-# with the trigger token, produces a face that agrees with photographs the
+# anchor it learned. The only question worth asking is whether the model, prompted
+# with the trigger token, produces an anchor that agrees with references the
 # training never saw. So each checkpoint generates a small probe set from the
 # base T2V model - no VACE, no plate, no mask - which isolates the LoRA from
 # every other stage of the pipeline.
@@ -17,8 +17,8 @@
 # privileged status.
 #
 # The baseline row is the same prompt and seeds with NO LoRA. Without it a
-# similarity of 0.3 is unreadable: the base model produces a person too, and
-# some faces resemble each other.
+# similarity of 0.3 is unreadable: the base model produces a candidate too, and
+# some anchors resemble each other.
 #
 # Rule 1: everything is written to disk. Nothing is displayed.
 #
@@ -69,7 +69,18 @@ if [ ! -f "$DIT" ]; then
 fi
 
 TRIGGER="$(cat "$(find "$DATASET/train" -name '*.txt' | sort | head -1)")"
-PROMPT="a photo of $TRIGGER, head and shoulders, looking at the camera, plain background"
+# The probe wording is conditioning text and lives in the untracked overlay,
+# alongside the profile prompts - see scripts/common.py for why. It is not
+# defaulted: probing every checkpoint against different wording than produced the
+# recorded scores makes the comparison meaningless, and this loop is not cheap.
+PROMPT="$("$ROOT/venv/bin/python" -c "
+import sys, yaml
+d = yaml.safe_load(open('$ROOT/configs/prompt.local.yaml')) or {}
+t = d.get('probe_prompt')
+if not t:
+    sys.exit('configs/prompt.local.yaml records no probe_prompt')
+print(t.replace('{trigger}', '$TRIGGER'))
+")"
 say "trigger '$TRIGGER' | seeds: $SEEDS | ${SIZE}px | $STEPS steps"
 say "prompt: $PROMPT"
 
@@ -133,5 +144,5 @@ done
   echo "in $LOG, and see scripts/prepare_musubi_dit.py." >&2; exit 1; }
 
 say "scoring against the held-out bank"
-"$ROOT/venv/bin/python" "$ROOT/scripts/score_lora_identity.py" \
+"$ROOT/venv/bin/python" "$ROOT/scripts/score_lora_match.py" \
     --media "$EVAL_DIR"/*/ --dataset "$DATASET" 2>&1 | tee -a "$LOG"

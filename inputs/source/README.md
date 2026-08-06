@@ -34,8 +34,8 @@ venv/bin/python scripts/preprocess_source.py --auto-aspect
 ```
 
 `--auto-aspect` picks generation dimensions matching your true display aspect
-ratio instead of padding to 16:9. For a 4:3 240p source that means 640×480
-rather than 832×480 with bars down the sides.
+ratio instead of padding to 16:9 and wasting capacity on the bars down the sides.
+It reports the dimensions it chose; both axes are always multiples of 16.
 
 Read `reports/source_info.md` afterwards — it flags variable frame rate,
 interlacing, non-square pixels and rotation metadata, all of which change what

@@ -3,7 +3,7 @@
 
 Reports:
   * seconds per generated frame
-  * estimated wall-clock for the whole 30-minute video
+  * estimated wall-clock for the whole source
   * estimated intermediate and output disk usage
   * peak VRAM
 
