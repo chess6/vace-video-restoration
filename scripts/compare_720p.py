@@ -294,9 +294,13 @@ def main() -> int:
             log.info("wrote %s  (%dx%d, 100%% scale)", dst, sheet.shape[1],
                      sheet.shape[0])
 
+    # int() every box coordinate: they come from numpy and json.dumps refuses an
+    # int64, which killed the write AFTER every video and crop had been produced
+    # - the run looked complete and silently had no numbers.
     (out / "compare_720p.json").write_text(json.dumps(
         {"baseline": base_lab, "frames": int(n),
-         "subject_box": list(box) if box else None, "streams": stats}, indent=2))
+         "subject_box": [int(v) for v in box] if box else None,
+         "streams": stats}, indent=2))
     log.info("wrote %s", out / "compare_720p.json")
     log.info("Open them yourself; nothing was displayed.")
     return 0

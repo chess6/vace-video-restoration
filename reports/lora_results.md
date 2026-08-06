@@ -238,6 +238,37 @@ meant to keep 7B's detail without its coloured static. It kept neither: 44%
 whole-frame sharpness against 3B's 333%, and *more* chroma noise than 3B, not
 less. 3B aggressive is the plate to ship.
 
+## VACE-14B: the last lever, and it goes the wrong way
+
+One pass on the same five-second interval, same masks, same approved track, same
+3B plate underneath, same prompt and seed. The only change from the control arm
+is the checkpoint — `configs/cloud_720p_14b.yaml` extends that arm rather than
+`cloud_14b.yaml`, whose 1280x720 geometry would have invalidated every asset and
+forced a re-track. No LoRA: it is welded to 1.3B and its shapes do not fit 14B.
+
+| stream | frame | **in-mask (regenerated)** | chroma |
+|---|---|---|---|
+| Lanczos 720p | 15.2 | 9.7 | 1.58 |
+| **plate 3B** | 65.6 | **16.5 (+70.7%)** | 2.12 |
+| VACE 1.3B | 56.2 | 8.0 (−16.9%) | 1.57 |
+| VACE 1.3B + LoRA | 55.3 | 8.4 (−12.8%) | 1.40 |
+| **VACE 14B** | 59.7 | **7.2 (−25.5%)** | 1.46 |
+
+**14B is the worst VACE arm measured.** It does not merely fail to beat the
+plate's +70.7%; in the pixels it repaints it lands 25% *below* a plain Lanczos
+upscale, and below 1.3B with or without the LoRA. Its frame-level number is the
+highest of the VACE rows (59.7) purely because 95.56% of the frame is plate.
+
+Cost of the answer: 26m 44s of A100 80GB at 19.81 s/frame, peak 59.2 GB — so
+fp16 14B does fit one 80 GB card at this geometry, which the runbook had listed
+as plausible but undemonstrated. About $1.30 including the 33 GB download.
+
+**This closes the question.** VACE does not earn its place on this footage at any
+size worth renting, and no subject LoRA changes that, because the constraint was
+never model capacity — it is that the protected path regenerates 4.44% of the
+figure under a control video that pins every pixel of it. The deliverable is the
+plate.
+
 ## Cost
 
 | | |

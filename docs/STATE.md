@@ -91,21 +91,18 @@ through `identity.resolve_targets`, never `evaluate_pilot.py`'s own bank.
   **65.9** (3B) vs 50.3 (7B) vs 22.0 (7B at denoise 0.75 + lab, which kept
   neither the detail nor the quiet — that experiment is closed). A `background`
   key names the **profile, not the model**: one key can hold either's pixels.
-- **In the pixels VACE regenerates it is at or below a plain Lanczos upscale**:
-  on the 3B plate, baseline 9.7, plate 14.2 (+47%), VACE 8.0 / 8.4 with the
-  LoRA. It discards the plate's work in the one region a viewer looks at.
-  Measure **in-mask, never the bounding box** — the box is 20x the submask and
-  reports +120%, the plate read back as VACE's (`scripts/compare_720p.py`).
+- **In the pixels VACE regenerates it is below a plain Lanczos upscale**: on the
+  3B plate, baseline 9.7, plate 16.5, VACE 8.0 / 8.4 / 7.2 (14B). Measure
+  **in-mask, never the bounding box** — the box is 20x the submask and reports
+  +120%, the plate read back as VACE's (`scripts/compare_720p.py`).
 - **Sharpness and chroma point opposite ways**: the plate is sharpest and
   noisiest (+36%), the LoRA arm cleanest (−12%). Report both or the metric
   contradicts the eye — it did, for a session.
 - **A subject LoRA learns the face and barely moves the pipeline.** 0.023 →
-  **0.5167** trained (ceiling 0.7454), yet matched arms give 0.1682 vs 0.1612,
-  0.1263 at double strength, on the plate 0.2015 vs 0.1769: **the protected path
-  has no room for an identity prior**. It is still the better VACE arm on the 3B
-  plate (in-mask 8.4 vs 8.0, chroma −12% vs −1%). Score only against the
-  held-out split; the trigger token is load-bearing; musubi's merge trap is in
-  `prepare_musubi_dit.py`.
+  **0.5167** trained (ceiling 0.7454), yet matched arms give 0.1682 vs 0.1612 and
+  0.2015 vs 0.1769 on the plate. It is the best VACE arm (in-mask 8.4 vs 8.0)
+  and still below a plain upscale. Score only against the held-out split; the
+  trigger token is load-bearing; musubi's merge trap: `prepare_musubi_dit.py`.
 - Composite in `gbrp`, not `yuv420p`; after `--protected` pass `--mask` the
   submask, else the garment arrives VAE-degraded.
 
@@ -196,5 +193,8 @@ irreplaceable half off a box; run it FIRST, before any work.
 
 - `mask.grow=4` puts 4.51% of the dilated mask onto another person: reduce it or
   rely on the occluder layer.
-- Untested: **VACE-14B**. Pose-vs-depth control and any further LoRA work matter
-  only if VACE earns its place at a larger size — at 1.3B it has not.
+- **VACE-14B is tested and it is worse**: in-mask 7.2 against 1.3B's 8.0, the
+  LoRA's 8.4, the plate's 16.5 and a plain upscale's 9.7. fp16 fits one 80 GB
+  card (peak 59.2 GB, 19.81 s/frame). The constraint was never capacity — it is
+  that 4.44% of the figure is repainted under a control video pinning every
+  pixel. **VACE is out; the plate is the deliverable.** Pose-vs-depth is moot.
