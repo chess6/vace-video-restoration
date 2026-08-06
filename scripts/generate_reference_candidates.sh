@@ -43,6 +43,7 @@ OUT="${OUT:-$ROOT/intermediate/ref_candidates}"
 
 SEEDS="101 202 303 404 505"
 STEPS=25
+GRID=head
 # 480x832 portrait: t2v-1.3B declares ('480*832','832*480') as its supported
 # sizes, and the probe runs at 384 warned about exactly that. Portrait also puts
 # the pixels where a head shot needs them.
@@ -53,6 +54,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --seeds) SEEDS="$2"; shift 2 ;;
     --steps) STEPS="$2"; shift 2 ;;
+    --grid)  GRID="$2";  shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -77,11 +79,11 @@ t=d.get('trigger')
 sys.exit('dataset.json records no trigger') if not t else print(t)
 ")"
 [ -n "$TRIGGER" ] || { echo "FATAL: no trigger token in $DATASET/dataset.json" >&2; exit 1; }
-say "trigger '$TRIGGER' | seeds: $SEEDS | ${W}x${H} | $STEPS steps"
+say "trigger '$TRIGGER' | grid $GRID | seeds: $SEEDS | ${W}x${H} | $STEPS steps"
 
 # The grid is pose first, lighting second: pose is what a RefSR matcher aligns
 # on, lighting is what makes a transferred texture look wrong if it disagrees.
-VARIANTS=(
+HEAD_VARIANTS=(
   "head_on:looking straight at the camera, head and shoulders"
   "turned_left:head turned to the left, head and shoulders"
   "turned_right:head turned to the right, head and shoulders"
@@ -91,6 +93,36 @@ VARIANTS=(
   "warm_lamp:looking at the camera, warm indoor lamp light, head and shoulders"
   "overhead:looking at the camera, overhead room light, slight shadow under the brow"
 )
+
+# Full-figure framing trades face detail for body coverage: the same 480x832
+# canvas now holds a whole person, so pixels per facial feature fall sharply.
+# That is measured, not assumed - the eye px column says how far.
+#
+# THE GARMENT WARNING. This LoRA was trained on HEAD CROPS, deliberately, so it
+# knows a face and hair and nothing else. Everything below the neck in these
+# images is the base model inventing clothing, and it is not the clothing in the
+# source interval. docs/STATE.md is explicit that the garment in the source is
+# the sole ground truth and that references may condition identity only. A
+# RefSR model handed one of these transfers texture wholesale and cannot be told
+# to take the face and leave the shirt. Treat them as evidence about build and
+# proportion, never as a garment donor.
+FIGURE_VARIANTS=(
+  "fig_standing_front:full body, standing, facing the camera"
+  "fig_standing_angled:full body, standing, turned slightly away from the camera"
+  "fig_waist_up:from the waist up, facing the camera"
+  "fig_seated:full body, seated"
+  "fig_side:full body, side view"
+  "fig_walking:full body, walking towards the camera"
+  "fig_arms_raised:full body, arms raised"
+  "fig_daylight:full body, standing, soft even daylight"
+)
+
+case "$GRID" in
+  head)   VARIANTS=("${HEAD_VARIANTS[@]}") ;;
+  figure) VARIANTS=("${FIGURE_VARIANTS[@]}") ;;
+  both)   VARIANTS=("${HEAD_VARIANTS[@]}" "${FIGURE_VARIANTS[@]}") ;;
+  *) echo "FATAL: --grid must be head, figure or both" >&2; exit 2 ;;
+esac
 
 for v in "${VARIANTS[@]}"; do
   name=${v%%:*}; desc=${v#*:}
