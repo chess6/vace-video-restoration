@@ -188,7 +188,7 @@ Past mistakes worth not repeating — each cost a wrong conclusion:
 
 ## Cloud and open work
 
-`docs/`: `CLOUD_RUNBOOK.md` (quirks, allowlist, gates, teardown), `MODEL_SWAP.md` (UNet swaps), `CANDIDATE_GENERATION.md` (Chroma candidate path).
+`docs/`: `CLOUD_RUNBOOK.md` (quirks, allowlist, gates, teardown), `MODEL_SWAP.md` (UNet swaps), `CANDIDATE_GENERATION.md` + `LORA_TRAINING.md` (candidates).
 `scripts/state_bundle.sh` carries the irreplaceable half off a box; run it FIRST.
 Dilation is not free: `mask.grow=4` put 4.51% of the mask onto another candidate —
 rely on the occluder layer instead.
