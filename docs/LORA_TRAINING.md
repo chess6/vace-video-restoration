@@ -17,11 +17,18 @@ anchor, anchor region, extent, candidate, match.
 
 | | |
 |---|---|
-| Base | **`Chroma1-HD`** — Flux-derived MMDiT, Apache-2.0 |
-| ai-toolkit arch | `chroma` |
-| Adapter | LoRA, rank 16 / alpha 16, saved fp16 (~112 MB per checkpoint) |
-| Trained | the DiT only — the text encoder is **not** trained |
-| Text encoder | T5-XXL, frozen |
+| Base, as the trainer loads it | `lodestones/Chroma1-HD` (diffusers layout) with `arch: chroma` |
+| Same weights, as inference loads them | `Chroma1-HD.safetensors` in `ComfyUI/models/diffusion_models/` |
+| Text encoder | `t5xxl_fp8_e4m3fn.safetensors` — T5-XXL, **frozen** |
+| VAE | `chroma_ae.safetensors` (the Flux VAE, `ae.safetensors` upstream) |
+| Adapter | LoRA rank 16 / alpha 16, saved fp16, ~112 MB per checkpoint |
+| Adapter output | `chroma_subject_v*.safetensors` |
+| Trained | the DiT only |
+
+Chroma is a Flux-derived MMDiT, Apache-2.0. Sizes and SHA256 for every weight
+file are recorded in `reports/versions.md` (rule 7) — that, not this table, is
+what identifies the exact bytes in use, since a file replaced under the same
+name is a different model.
 
 **A LoRA is welded to the base it was trained against.** The Chroma adapters will
 not load onto the Wan checkpoint and the Wan ones will not load onto Chroma:
