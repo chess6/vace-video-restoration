@@ -13,6 +13,33 @@ anchor, anchor region, extent, candidate, match.
 
 ---
 
+## What is being trained, and onto what
+
+| | |
+|---|---|
+| Base | **`Chroma1-HD`** — Flux-derived MMDiT, Apache-2.0 |
+| ai-toolkit arch | `chroma` |
+| Adapter | LoRA, rank 16 / alpha 16, saved fp16 (~112 MB per checkpoint) |
+| Trained | the DiT only — the text encoder is **not** trained |
+| Text encoder | T5-XXL, frozen |
+
+**A LoRA is welded to the base it was trained against.** The Chroma adapters will
+not load onto the Wan checkpoint and the Wan ones will not load onto Chroma:
+different architectures, different tensor names, different shapes. There is no
+"convert" here — a base change means retraining. Verify binding before spending
+generation time, because a mismatched adapter does not necessarily raise; it can
+apply nothing and leave a run that recorded a LoRA it was not influenced by.
+
+**ai-toolkit loads the base through diffusers, not the single-file checkpoint
+ComfyUI uses.** They are the same weights in different packaging, so the volume
+ends up holding two copies — one for training, one for inference. Worth knowing
+before diagnosing disk use, and worth not "tidying" either away.
+
+The text encoder is left frozen deliberately: the vendor config notes that
+training it is not expected to work for this architecture, and the subject
+signal wanted here is visual, not lexical. The trigger is a handle bound in the
+DiT, not a new word taught to the encoder.
+
 ## Trainer and environment
 
 `ai-toolkit`, cloned to the volume, **in its own virtualenv**. It is kept
