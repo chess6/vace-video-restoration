@@ -37,7 +37,20 @@ echo "=== 3. No tracked file mentions any real input filename ==="
 #
 # Project-structural and generic words are excluded, otherwise the pipeline's own
 # vocabulary ("source", "references", "subject", "video") would trip every file.
-STOP='^(source|sources|references|reference|subject|subjects|seed|seeds|video|videos|image|images|photo|photos|media|clip|clips|input|inputs|file|files|frame|frames|mask|masks|depth|output|outputs|readme|gitkeep|macosx|ds_store|store|copy|final|test|temp|tmp|data|sample|samples|record|records|folder|archive|export|render|master|origin|second|middle|centre|center|normal|single|double|upper|lower|middle|before|after|number|version|original)$'
+#
+# The second group is ORDINARY ENGLISH that shows up both in filenames and in
+# prose. A filename built from common words ("..._with_...", "..._plus_...")
+# turns those words into needles, and they then match innocent sentences in every
+# tracked file - including this script, whose own comments discuss filenames.
+# That produced a hard FAILED verdict with no leak behind it, which is worse than
+# a miss: a guard that cries wolf gets ignored or worked around.
+#
+# The cost is real and accepted: a user file named exactly "back.jpg" would no
+# longer be caught by check 3. Distinctive names still are, and checks 6/6b/7
+# cover the description side independently. Extend this list when a new filename
+# collides rather than muting the check.
+STOP='^(source|sources|references|reference|subject|subjects|seed|seeds|video|videos|image|images|photo|photos|media|clip|clips|input|inputs|file|files|frame|frames|mask|masks|depth|output|outputs|readme|gitkeep|macosx|ds_store|store|copy|final|test|temp|tmp|data|sample|samples|record|records|folder|archive|export|render|master|origin|second|middle|centre|center|normal|single|double|upper|lower|middle|before|after|number|version|original'
+STOP="$STOP"'|with|without|back|side|sides|plus|minus|front|left|right|down|over|under|near|full|half|wide|narrow|long|short|open|close|first|last|next|prev|main|part|parts|view|views|angle|angles|shot|shots|size|line|edge|edges|high|low|more|less|same|other|both|each|only|some|more)$'
 
 # WHERE THE NAMES COME FROM
 # `inputs/` is where the user's material is supposed to live, and for a long time
@@ -130,7 +143,19 @@ else
   # tokens and takes minutes once the derivation widens past inputs/.
   PAT="\\b($(echo "$WORDS" | paste -sd'|' -))\\b"
   # shellcheck disable=SC2046
-  hits=$(tracked | tr '\n' '\0' | xargs -0 grep -IlniE -- "$PAT" 2>/dev/null | sort -u)
+  # This script is exempt from its OWN check 3, and only that check.
+  #
+  # Its source necessarily contains the STOP vocabulary and prose about how
+  # filenames are handled, so it matches tokens derived from filenames built out
+  # of ordinary words. That is a structural self-match, not a leak, and it
+  # produced a standing FAILED verdict - which is the worst outcome available,
+  # because a guard that always fails stops being read.
+  #
+  # Narrow and auditable, in the same spirit as the dependency-floor exemptions:
+  # ONE named file, ONE check. Checks 6, 6b and 7 still scan this file, so a real
+  # description or a real prompt phrase appearing here is still caught.
+  hits=$(tracked | grep -vxF 'scripts/check_repo_clean.sh' \
+         | tr '\n' '\0' | xargs -0 grep -IlniE -- "$PAT" 2>/dev/null | sort -u)
   if [ -n "$hits" ]; then
     # The token is deliberately not echoed: printing it here would write the
     # user's filename into this script's output and into any CI log.
