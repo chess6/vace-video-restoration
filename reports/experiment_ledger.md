@@ -55,7 +55,18 @@ never compared with and without the adapter at fixed seed — the sweep varied
 strength, and no metric here detects the defect, so "worse" was never measurable.
 Adapter aggravation stays a live hypothesis.
 
-**17/18 — precision is NOT closed. The record cannot support the claim.** The
+**17/18 — precision IS now closed, by bundle 20 rather than by these bundles.**
+Runtime telemetry measured the loaded model: declared `fp8_e4m3fn` gives 643/644
+tensors in `float8_e4m3fn` and a `float8_e4m3fn` compute dtype; declared
+`default` gives 643/644 in `bfloat16` and a `bfloat16` compute dtype, same
+checkpoint digest. Regenerating at `default` with everything else held then
+reproduced bundle 18's arm **bit-for-bit** — mean absolute difference 0.000, zero
+pixels changed — so that arm really was native precision. The labels were right;
+what was missing was any reason to believe them.
+
+The original reasoning is left below because the correction is the point.
+
+**17/18 as recorded at the time — the record could not support the claim.** The
 runtime dtype is **not** captured in the provenance sidecars for these bundles,
 so the arm labels rest on a directory name and an argument passed to a loader,
 never on a measurement.
@@ -99,7 +110,7 @@ region the model reaches for smooth rather than structured.
 
 | Asked for | Status |
 |---|---|
-| verified native-precision control | **not run — this is now the blocking arm** |
+| verified native-precision control | **DONE — bundle 20, and it closes precision** |
 | officially-prepared scaled-FP8 | not run; secondary to the above |
 | tighter framing that **contains the region** | **not run** — see the correction below |
 | targeted or focus-masked adaptation | not run — blocked on verified evidence of the region |
@@ -126,7 +137,7 @@ Which of the four candidate causes owns this failure:
 
 | Candidate | Verdict |
 |---|---|
-| Quantisation | **UNVERIFIED.** Not excluded — see below. |
+| Quantisation | **EXCLUDED, on a measurement.** Bundle 20. |
 | The current subject adapter | **Not the sole or necessary cause.** Not "excluded": see below. |
 | Base-model capability | **Strongly implicated, one confound outstanding.** |
 | Absent training evidence | **Open and never audited.** |
