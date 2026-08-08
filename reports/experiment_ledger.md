@@ -168,7 +168,7 @@ region the model reaches for smooth rather than structured.
 |---|---|
 | verified native-precision control | **DONE — bundle 20, and it closes precision** |
 | base-only capability gate | **PARTIAL — bundle 21**: full framing only, and no dedicated-fill arm |
-| dedicated-fill arm, SDXL-inpainting | **NOT RUN.** Set aside by decision before any arm was generated — *not* a measured failure, and nothing about that checkpoint's capability is established. The weights are on the volume and the build has the loader nodes, so it remains runnable. |
+| dedicated-fill arm, SDXL-inpainting | **IGNORE — do not run, do not revisit.** Closed on the user's judgement that it will not work. No arm was ever generated, so this is a decision and not a measurement: it is not evidence about that checkpoint, and it says nothing at all about dedicated fill in general. The weights sit unused on the volume. |
 | dedicated-fill arm, purpose-built (FLUX.1-Fill-dev) | **BLOCKED** — licence-gated download, no token on this machine. This is the next required gate. |
 | evidence audit of the training set | **manifest built — bundle 21**, 27 crops at the trainer's largest bucket, awaiting labels |
 | officially-prepared scaled-FP8 | not run; secondary to the above |
