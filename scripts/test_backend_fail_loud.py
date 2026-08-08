@@ -84,7 +84,7 @@ def test_imports_are_hermetic() -> None:
         import make_occluders
         check("make_reference_pack imports with no binding", True)
         check("make_occluders imports with no binding", True)
-        # ...and still refuses to hand out a binding it does not have.
+        # ...and still refuses to return a binding it does not have.
         check("label_map() raises when nothing is bound",
               raises_unavailable(make_reference_pack.label_map))
         check("group() raises when nothing is bound",
