@@ -34,8 +34,24 @@ import os
 import pathlib
 from typing import Any, Dict
 
-_CONFIG = pathlib.Path(__file__).resolve().parent.parent / "configs" / (
-    "backends" ".local.yaml")
+def _config_path() -> pathlib.Path:
+    """Where the binding lives. Overridable by $VACE_BACKENDS_CONFIG.
+
+    The override exists so a checkout can be exercised AS IF it had no binding —
+    point it at a path that does not exist and every role fails exactly as it
+    would on a fresh clone. Without it the only way to test that state is to move
+    the real file aside, which is both destructive and blocked by the rule-2c
+    tooling. It is a test affordance, not a search path: there is still no
+    default and nothing falls back.
+    """
+    env = os.environ.get("VACE_BACKENDS_CONFIG")
+    if env:
+        return pathlib.Path(env)
+    return pathlib.Path(__file__).resolve().parent.parent / "configs" / (
+        "backends" ".local.yaml")
+
+
+_CONFIG = _config_path()
 _cache: Dict[str, Any] | None = None
 _injected: Dict[str, Any] | None = None
 
@@ -71,9 +87,10 @@ def _load() -> Dict[str, Any]:
         return _injected
     if _cache is not None:
         return _cache
-    if not _CONFIG.exists():
+    cfg = _config_path()
+    if not cfg.exists():
         raise BackendUnavailable(
-            f"{_CONFIG.relative_to(_CONFIG.parent.parent)} is missing, so no backend "
+            f"{cfg.name} is missing, so no backend "
             "is bound to any role.\n"
             "It is untracked by design (CLAUDE.md rules 2a and 2c): a pretrained "
             "model's name says what it was trained to find, which says what the "
@@ -86,7 +103,7 @@ def _load() -> Dict[str, Any]:
         import yaml
     except ImportError as exc:  # pragma: no cover - environment problem, not logic
         raise BackendUnavailable(f"PyYAML is required to read {_CONFIG.name}: {exc}")
-    with open(_CONFIG) as fh:
+    with open(cfg) as fh:
         _cache = yaml.safe_load(fh) or {}
     return _cache
 
@@ -104,7 +121,7 @@ def binding(role: str) -> Dict[str, Any]:
     got = cfg.get(role)
     if not isinstance(got, dict) or not got:
         raise BackendUnavailable(
-            f"No backend bound to role '{role}' in {_CONFIG.name}.\n"
+            f"No backend bound to role '{role}' in {_config_path().name}.\n"
             f"Add a '{role}:' block. Known roles: anchor_embed, attribute_parser."
         )
     return got

@@ -97,10 +97,11 @@ most of the investigation.
 | 13 | review_three_arms | LoRA arm × seed | baseline B | 9 | **arms indistinguishable; the seed dominates** |
 | 14 | prompt_ablation | negative: current / empty | seed | 6 | **prompt ruled out**; empty is worse |
 | 15 | vae_roundtrip | encode→decode, two scales | — | 4 | **VAE ruled out**: ~44 dB, SSIM 0.9995+ |
-| 16 | lora_strength | 0.00 / 0.80 / 1.00 / 1.15 / 1.30 | seed, baseline | 12 | adapter **not necessary** for the defect — see below |
-| 17 | dit_precision | declared dtype (3 values) | seed | 6 | two quantised settings identical; **dtypes unverified** |
-| 18 | seed_precision | 6 seeds × 2 declared dtypes | baseline B | 12 | **no seed renders it cleanly**; dtypes unverified |
+| 16 | lora_strength | 0.00 / 0.80 / 1.00 / 1.15 / 1.30 | seed, baseline | 12 | adapter **not necessary** for the defect |
+| 17 | dit_precision | declared dtype (3 values) | seed | 6 | two quantised settings identical; dtypes since **verified** (20) |
+| 18 | seed_precision | 6 seeds × 2 declared dtypes | baseline B | 12 | **no seed renders it cleanly**; dtypes since **verified** (20) |
 | 19 | region_repair | denoise 0.30–0.55 × 2 seeds × 3 images | measured box per image | 33 | **local repair fails** |
+| 20 | dtype_verified | declared dtype, then adapter present/absent | seed, prompt digests, verified dtype | 3 | **precision excluded**; **base-only is WORSE** |
 
 Baseline A and baseline B differ in resolution, cfg and flow shift; rows are only
 comparable inside one of them.
@@ -112,10 +113,10 @@ The `0.00` arm does not set strength to zero; it builds the graph with **no
 adapter node at all**, and the defect is present in the bare base model. So the
 base produces it unaided and the adapter is not required for it to appear.
 
-What this does **not** show is that the adapter never worsens it. Severity was
-never compared with and without the adapter at fixed seed — the sweep varied
-strength, and no metric here detects the defect, so "worse" was never measurable.
-Adapter aggravation stays a live hypothesis.
+What it does **not** show is anything about whether the adapter makes the region
+worse — the sweep varied strength, and severity was never compared with and
+without it at fixed seed. That question was left open here and answered by
+bundle 20, in the opposite direction: the adapter makes the region **better**.
 
 **17/18 — precision IS now closed, by bundle 20 rather than by these bundles.**
 Runtime telemetry measured the loaded model: declared `fp8_e4m3fn` gives 643/644
@@ -125,27 +126,6 @@ checkpoint digest. Regenerating at `default` with everything else held then
 reproduced bundle 18's arm **bit-for-bit** — mean absolute difference 0.000, zero
 pixels changed — so that arm really was native precision. The labels were right;
 what was missing was any reason to believe them.
-
-The original reasoning is left below because the correction is the point.
-
-**17/18 as recorded at the time — the record could not support the claim.** The
-runtime dtype is **not** captured in the provenance sidecars for these bundles,
-so the arm labels rest on a directory name and an argument passed to a loader,
-never on a measurement.
-
-An earlier revision argued the question was closed anyway, because the arms
-produced visibly different output and therefore could not have been the same
-dtype. **That inference is invalid** and is withdrawn: a difference in output
-shows only that something differed, not which dtype either arm ran at, and
-specifically not that the arm labelled unquantised ran unquantised. A loader can
-silently fall back; a declared dtype is a request, not a receipt.
-
-This is the unresolved arm. Closing it needs runtime telemetry — loaded
-checkpoint digest, declared dtype, actual tensor/compute dtype where the runtime
-exposes it, and which loader implementation ran — plus one fixed-seed control at
-verified native precision against the existing quantised result with every other
-input held. `weight_dtype` is recorded by the newer tooling; the older records
-are not retrofittable and are marked incomplete rather than reinterpreted.
 
 **19 — the strongest available test, and it failed.** The region was cropped with
 context, resampled up so it reached the sampler at **4× linear / 16× area**,
@@ -230,51 +210,6 @@ Two readings remain, and they are not separable from these images:
 
 Either way the next move is the same, and it is not a model swap.
 
-### Two verdicts corrected under review
-
-**Quantisation is unverified, not excluded, and the earlier wording overclaimed.**
-The argument was: the two precision arms produced visibly different output, so
-they cannot have been the same dtype, so the higher-precision one is a real
-control and it shows the defect. The second step does not follow. That the arms
-*differed* establishes only that *something* differed — a loader path, a cast
-schedule, a fallback inside the loader. It does not establish **which** dtype
-either arm actually ran at, and in particular does not establish that the arm
-labelled unquantised ran unquantised. No runtime dtype was ever captured; the
-labels come from a directory name and an argument passed to a loader.
-
-Inferring a dtype from output that "looks different" is the same class of error
-this project has already paid for under other names — a proxy standing in for the
-thing itself. The correct status is **unverified**, and it stays unverified until
-telemetry records the loaded checkpoint digest, the declared dtype, and the
-actual tensor/compute dtype the runtime reports.
-
-**The adapter is not the sole or necessary cause. That is weaker than "excluded".**
-The zero arm builds the graph with no adapter node at all and the defect is
-present, which proves the base model produces it unaided — so the adapter is not
-*required* for the defect to appear. It does **not** prove the adapter never
-makes it worse. No arm has ever compared defect severity with and without the
-adapter at fixed seed and fixed everything else; the sweep varied strength, and
-severity was never measured because no metric here detects the defect at all.
-"Adapter aggravation" therefore remains a live hypothesis, and it is one of the
-outcomes the pending decision must choose between.
-
-The outstanding confound is narrow and worth stating precisely: bundle 19's
-higher-denoise arms — the ones aimed at *structure* rather than appearance — were
-conditioned on the full-frame template, which on a magnified crop asks for a
-whole subject inside the crop. The arms aimed at appearance (0.30–0.40) are
-unaffected, because at that denoise the input latent holds composition. So
-"local repair failed" is established for appearance correction and **not yet
-clean for structural correction**.
-
-The cheapest way to close it adds no new wording at all: condition the redraw on
-the trigger alone, or on nothing, at high denoise. Tooling supports both.
-
-The fourth row is the one nobody has evidence about in either direction. It
-cannot be settled by generation — it requires auditing whether verified source
-material contains usable evidence of the region *after* trainer resizing and
-cropping. Until that audit exists, "the base model cannot draw it" and "the
-adaptation was never shown it" are indistinguishable from the outputs.
-
 ## Recommended architecture
 
 **Restoration path — unchanged and already settled.** The restored plate ships.
@@ -324,3 +259,85 @@ when the reading was "the base cannot draw it and nothing moves it". The adapter
 moves it. Replacing the base would discard the one component demonstrated to
 help, and would require re-establishing subject adaptation from scratch on a new
 stack before the region could even be assessed.
+
+---
+
+## Superseded record
+
+**Nothing below is current.** It is kept because the corrections are the more
+useful half of this document: each of these was the authoritative verdict at the
+time, was argued for, and turned out to be wrong. The current verdicts are in
+**Decision** above and nowhere else — if this section and that one disagree, that
+one wins.
+
+### Withdrawn: the precision record as it stood before bundle 20
+
+**17/18 as recorded at the time — the record could not support the claim.** The
+runtime dtype is **not** captured in the provenance sidecars for these bundles,
+so the arm labels rest on a directory name and an argument passed to a loader,
+never on a measurement.
+
+An earlier revision argued the question was closed anyway, because the arms
+produced visibly different output and therefore could not have been the same
+dtype. **That inference is invalid** and is withdrawn: a difference in output
+shows only that something differed, not which dtype either arm ran at, and
+specifically not that the arm labelled unquantised ran unquantised. A loader can
+silently fall back; a declared dtype is a request, not a receipt.
+
+This is the unresolved arm. Closing it needs runtime telemetry — loaded
+checkpoint digest, declared dtype, actual tensor/compute dtype where the runtime
+exposes it, and which loader implementation ran — plus one fixed-seed control at
+verified native precision against the existing quantised result with every other
+input held. `weight_dtype` is recorded by the newer tooling; the older records
+are not retrofittable and are marked incomplete rather than reinterpreted.
+
+### Withdrawn: "quantisation is unverified" and "the adapter is not excluded"
+
+Both were written when the review withdrew the *previous* pair of overclaims, and
+both have since been settled by bundle 20 — quantisation by runtime telemetry
+plus a bit-identical control, the adapter by a base-only arm showing the region
+is *worse* without it. The reasoning as it stood:
+
+
+**Quantisation is unverified, not excluded, and the earlier wording overclaimed.**
+The argument was: the two precision arms produced visibly different output, so
+they cannot have been the same dtype, so the higher-precision one is a real
+control and it shows the defect. The second step does not follow. That the arms
+*differed* establishes only that *something* differed — a loader path, a cast
+schedule, a fallback inside the loader. It does not establish **which** dtype
+either arm actually ran at, and in particular does not establish that the arm
+labelled unquantised ran unquantised. No runtime dtype was ever captured; the
+labels come from a directory name and an argument passed to a loader.
+
+Inferring a dtype from output that "looks different" is the same class of error
+this project has already paid for under other names — a proxy standing in for the
+thing itself. The correct status is **unverified**, and it stays unverified until
+telemetry records the loaded checkpoint digest, the declared dtype, and the
+actual tensor/compute dtype the runtime reports.
+
+**The adapter is not the sole or necessary cause. That is weaker than "excluded".**
+The zero arm builds the graph with no adapter node at all and the defect is
+present, which proves the base model produces it unaided — so the adapter is not
+*required* for the defect to appear. It does **not** prove the adapter never
+makes it worse. No arm has ever compared defect severity with and without the
+adapter at fixed seed and fixed everything else; the sweep varied strength, and
+severity was never measured because no metric here detects the defect at all.
+"Adapter aggravation" therefore remains a live hypothesis, and it is one of the
+outcomes the pending decision must choose between.
+
+The outstanding confound is narrow and worth stating precisely: bundle 19's
+higher-denoise arms — the ones aimed at *structure* rather than appearance — were
+conditioned on the full-frame template, which on a magnified crop asks for a
+whole subject inside the crop. The arms aimed at appearance (0.30–0.40) are
+unaffected, because at that denoise the input latent holds composition. So
+"local repair failed" is established for appearance correction and **not yet
+clean for structural correction**.
+
+The cheapest way to close it adds no new wording at all: condition the redraw on
+the trigger alone, or on nothing, at high denoise. Tooling supports both.
+
+The fourth row is the one nobody has evidence about in either direction. It
+cannot be settled by generation — it requires auditing whether verified source
+material contains usable evidence of the region *after* trainer resizing and
+cropping. Until that audit exists, "the base model cannot draw it" and "the
+adaptation was never shown it" are indistinguishable from the outputs.

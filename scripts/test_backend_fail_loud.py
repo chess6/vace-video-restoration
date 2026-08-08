@@ -34,31 +34,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import backends  # noqa: E402
+from test_fixtures import (  # noqa: E402
+    FIXTURE, clear_binding_caches, synthetic_bindings,
+)
 
 FAILED: list[str] = []
-
-# A complete, entirely synthetic binding. Role words and invented ids only.
-FIXTURE = {
-    "anchor_embed": {
-        "package": "nonexistent_test_package",
-        "model": "test-model",
-        "entrypoint": "TestApp",
-        "det_size": [64, 64],
-    },
-    "attribute_parser": {
-        "id": "test-org/test-parser",
-        "revision": "0000000000000000000000000000000000000000",
-        "labels": {0: "background", 1: "region_a", 2: "region_b", 3: "region_c"},
-        "groups": {
-            "attribute": ["region_b"],
-            "exposed": ["region_c"],
-            "match_only": ["region_a"],
-            "anchor_region": ["region_a"],
-            "covering": ["region_c"],
-        },
-    },
-}
-
 
 def check(name: str, cond: bool, detail: str = "") -> None:
     print(f"{'ok  ' if cond else 'FAIL'}  {name}{('  ' + detail) if detail else ''}")
@@ -97,6 +77,7 @@ def test_imports_are_hermetic() -> None:
         check("stages import with no binding", False, f"import raised: {e}")
     finally:
         backends.use_bindings(None)
+    clear_binding_caches()
 
 
 def test_missing_binding_is_fatal() -> None:
@@ -112,6 +93,7 @@ def test_missing_binding_is_fatal() -> None:
               or raises_unavailable(backends.attribute_labels)
               or raises_unavailable(lambda: backends.label_group("attribute")))
     backends.use_bindings(None)
+    clear_binding_caches()
 
 
 def test_malformed_binding_is_fatal() -> None:
@@ -123,6 +105,7 @@ def test_malformed_binding_is_fatal() -> None:
         check(f"anchor_embedder raises when '{missing}' is absent",
               raises_unavailable(backends.anchor_embedder))
     backends.use_bindings(None)
+    clear_binding_caches()
 
 
 def test_stages_do_not_swallow_it() -> None:
@@ -136,6 +119,7 @@ def test_stages_do_not_swallow_it() -> None:
     log = logging.getLogger("test")
     log.addHandler(logging.NullHandler())
 
+    clear_binding_caches()
     backends.use_bindings({})
     # A missing THIRD-PARTY dependency skips; a missing BINDING fails. Conflating
     # them is the same mistake this test exists to pin — an absent package says
@@ -164,16 +148,13 @@ def test_stages_do_not_swallow_it() -> None:
         check("track_subject importable with an anchor() method", False, str(e))
     finally:
         backends.use_bindings(None)
+    clear_binding_caches()
 
 
 def test_fixture_is_usable() -> None:
     """A synthetic binding satisfies every accessor, so tests can run on a clone."""
-    backends.use_bindings(FIXTURE)
-    try:
+    with synthetic_bindings():
         import make_reference_pack as mrp
-        mrp.label_map.cache_clear()
-        mrp.group.cache_clear()
-        mrp.parser_binding.cache_clear()
         check("label_map() resolves from the fixture",
               mrp.label_map() == {0: "background", 1: "region_a",
                                   2: "region_b", 3: "region_c"})
@@ -186,15 +167,6 @@ def test_fixture_is_usable() -> None:
         check("candidate_ids() excludes background", mo.candidate_ids() == {1, 2, 3})
         check("an unknown group still raises",
               raises_unavailable(lambda: backends.label_group("no_such_group")))
-    finally:
-        for mod, names in (("make_reference_pack",
-                            ("label_map", "group", "parser_binding")),
-                           ("make_occluders", ("candidate_ids",))):
-            m = sys.modules.get(mod)
-            for n in names:
-                if m and hasattr(getattr(m, n, None), "cache_clear"):
-                    getattr(m, n).cache_clear()
-        backends.use_bindings(None)
 
 
 def main() -> int:

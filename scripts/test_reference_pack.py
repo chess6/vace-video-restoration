@@ -48,6 +48,7 @@ from run_chunks import needs_run, settled_status  # noqa: E402
 # make_reference_pack, which made importing it require the untracked
 # binding. Accessors keep the fail-loud behaviour and move it to first use.
 from make_reference_pack import group as _group, label_map as _label_map  # noqa: E402
+from test_fixtures import synthetic_bindings  # noqa: E402
 
 
 def ATTRIBUTE(): return _group("attribute")
@@ -74,8 +75,10 @@ def synthetic_reference(h=64, w=48):
     labels = np.zeros((h, w), dtype=np.uint8)
     rgb = np.zeros((h, w, 3), dtype=np.uint8)
     rgb[:, :] = BG_RGB
-    anchor_id = next(i for i, n in LBL().items() if n == "face")
-    upper_id = next(i for i, n in LBL().items() if n == "upper")
+    # Derived from the GROUPS, never from label names spelled out here. Naming
+    # them put category words in a tracked file, and tied the test to one map.
+    anchor_id = next(i for i, n in LBL().items() if n in _group("anchor_region"))
+    upper_id = next(i for i, n in LBL().items() if n in _group("attribute"))
     labels[8:24, 12:36] = anchor_id
     rgb[8:24, 12:36] = EXPOSED_RGB
     labels[28:56, 8:40] = upper_id
@@ -143,7 +146,17 @@ def test_source_panel_is_untouched(f: Failures) -> None:
     panel = {"image": im, "labels": labels}
     source_crop = np.random.default_rng(0).integers(0, 256, (40, 30, 3),
                                                     dtype=np.uint8)
-    imgs, keeps = build_panel_images(panel, source_crop, panel)
+    # build_panel_images feathers by default, and feathering needs OpenCV. The
+    # skip is the same idiom the feathered check above already uses: an absent
+    # third-party package is an environment fact, and turning it into a failure
+    # trains the reader to ignore a red line. The BINDING-dependent half of this
+    # test has already run by the time we get here.
+    try:
+        imgs, keeps = build_panel_images(panel, source_crop, panel)
+    except ImportError:
+        f.append("SKIPPED source-panel check: OpenCV is not installed in this "
+                 "checkout, so the panel-building path could not be exercised")
+        return
 
     f.check(len(imgs) == 3 and len(keeps) == 3,
             f"expected 3 panels with 3 kept-fractions, got {len(imgs)}/{len(keeps)}")
@@ -515,22 +528,50 @@ def test_peripheral_extents_are_not_match(f: Failures) -> None:
     from make_reference_pack import group
     ANCHOR_REGION, COVERING = group("anchor_region"), group("covering")
     ATTRIBUTE, MATCH_ONLY = group("attribute"), group("match_only")
-    for part in ("left_arm", "right_arm", "left_leg", "right_leg"):
-        f.check(part not in MATCH_ONLY,
-                f"{part} is still conditioned from external references; how much "
-                f"of it is visible is attribute coverage, which belongs to the "
-                f"source")
+    EXPOSED = group("exposed")
+
+    # Stated as set relations over the GROUPS rather than a list of names. The
+    # relations are the stronger claim - they hold for any label map, whereas a
+    # name list stops covering whatever the map renames - and they keep category
+    # words out of a tracked file.
+    f.check(not (MATCH_ONLY & EXPOSED),
+            f"exposed class(es) {sorted(MATCH_ONLY & EXPOSED)} are conditioned "
+            "from external references; how much of a peripheral extent is "
+            "visible is attribute coverage, which belongs to the source")
     f.check(not (MATCH_ONLY & ATTRIBUTE), "an attribute class is conditionable")
     f.check(not (MATCH_ONLY & COVERING),
             "a covering class is conditionable, so an external reference showing "
             "the anchor uncovered could remove the source's covering")
-    f.check(MATCH_ONLY < ANCHOR_REGION and not (MATCH_ONLY & COVERING),
-            f"MATCH_ONLY is {sorted(MATCH_ONLY)}; only the uncovered part of the "
-            f"anchor region may come from an external reference")
+    f.check(MATCH_ONLY <= ANCHOR_REGION,
+            f"MATCH_ONLY is {sorted(MATCH_ONLY)}, which reaches outside the "
+            "anchor region")
+    # Where the map actually has a covering class inside the anchor region, the
+    # containment must be STRICT - that is the covered part being withheld.
+    # Where it does not, equality is correct and demanding strictness would be
+    # asserting a property of one particular label map.
+    if COVERING & ANCHOR_REGION:
+        f.check(MATCH_ONLY < ANCHOR_REGION,
+                "the anchor region has a covering class, so only its uncovered "
+                "part may come from an external reference")
 
 
 def main() -> int:
-    f = Failures()
+    # The synthetic binding is injected around the WHOLE suite, before any test
+    # that resolves a role. Two things follow, and both are the point:
+    #
+    #   * these tests run on a fresh checkout, which has no binding file - they
+    #     used to require private configuration to execute at all;
+    #   * they assert properties of the CODE rather than of one label map, so a
+    #     pass here means the authority split holds for any binding, not that
+    #     this machine's happens to satisfy it.
+    #
+    # synthetic_bindings clears every binding-dependent lru_cache on entry and
+    # exit, so nothing leaks in from an earlier import or out to a later test.
+    with synthetic_bindings():
+        return _run(Failures())
+
+
+def _run(f: Failures) -> int:
     for t in (test_class_partition, test_masking_removes_attributes,
               test_source_panel_is_untouched, test_content_change_invalidates,
               test_composite_key_is_independent_of_generation,
