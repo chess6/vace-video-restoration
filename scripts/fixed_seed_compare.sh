@@ -45,6 +45,7 @@ FLOW_SHIFT="${FLOW_SHIFT:-1}"
 LORA="${LORA:-}"
 LORA_STRENGTH="${LORA_STRENGTH:-1.0}"
 WEIGHT_DTYPE="${WEIGHT_DTYPE:-default}"
+UNET="${UNET:-}"          # empty = the generator's default checkpoint
 
 AXIS=""; VALUES=""; OUT="$PROJ/intermediate/fixed_seed_compare"
 while [ $# -gt 0 ]; do
@@ -74,11 +75,16 @@ echo
 
 IFS=',' read -ra VALS <<< "$VALUES"
 for v in "${VALS[@]}"; do
-  wd="$WEIGHT_DTYPE"; lora="$LORA"
+  wd="$WEIGHT_DTYPE"; lora="$LORA"; unet="$UNET"
   case "$AXIS" in
     weight-dtype) wd="$v" ;;
     lora)         lora="$v"; [ "$v" = "none" ] && lora="" ;;
-    *) echo "FATAL: unsupported axis '$AXIS' (weight-dtype|lora)" >&2; exit 2 ;;
+    # The capability-gate axis: same conditioning, same seed, same everything,
+    # a different checkpoint. Only valid for checkpoints sharing this stack - a
+    # different architecture needs its own encoder and latent format, and
+    # swapping the name alone would produce noise rather than a comparison.
+    unet)         unet="$v" ;;
+    *) echo "FATAL: unsupported axis (weight-dtype|lora|unet)" >&2; exit 2 ;;
   esac
 
   tag="${AXIS}_${v//[^A-Za-z0-9._-]/_}"
@@ -89,6 +95,7 @@ for v in "${VALS[@]}"; do
         --scheduler "$SCHEDULER" --flow-shift "$FLOW_SHIFT"
         --weight-dtype "$wd" --lora-strength "$LORA_STRENGTH")
   [ -n "$lora" ] && args+=(--lora "$lora")
+  [ -n "$unet" ] && args+=(--unet "$unet")
 
   log="$OUT/$tag.txt"
   "$PY" "$GEN" "${args[@]}" 2>&1 | tee "$log" | grep -E "digest|seed |->"
@@ -99,8 +106,16 @@ for v in "${VALS[@]}"; do
   cp -p "$img" "$OUT/$tag.png"
 
   # The receipt. Declared dtype is a request; this reads the loaded model.
-  "$PY" "$PROJ/scripts/dtype_probe.py" --weight-dtype "$wd" \
-      --output-image "$OUT/$tag.png" --out "$OUT/$tag.dtype.json" \
+  #
+  # --unet is passed EXPLICITLY. The probe has its own default, and letting it
+  # apply meant every arm of a checkpoint comparison was certified against the
+  # default checkpoint - six receipts naming a model that four of them had not
+  # loaded. The images were right and the provenance was wrong, which is the
+  # exact failure this script exists to prevent, found by reading the receipts.
+  probe_args=(--weight-dtype "$wd" --output-image "$OUT/$tag.png"
+              --out "$OUT/$tag.dtype.json")
+  [ -n "$unet" ] && probe_args+=(--unet "$unet")
+  "$PY" "$PROJ/scripts/dtype_probe.py" "${probe_args[@]}" \
       2>&1 | grep -E "VERDICT|DECLARED AND ACTUAL"
   echo
 done

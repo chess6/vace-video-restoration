@@ -102,6 +102,7 @@ most of the investigation.
 | 18 | seed_precision | 6 seeds × 2 declared dtypes | baseline B | 12 | **no seed renders it cleanly**; dtypes since **verified** (20) |
 | 19 | region_repair | denoise 0.30–0.55 × 2 seeds × 3 images | measured box per image | 33 | **local repair fails** |
 | 20 | dtype_verified | declared dtype, then adapter present/absent | seed, prompt digests, verified dtype | 3 | **precision excluded**; **base-only is WORSE** |
+| 21 | capability_gate | checkpoint: current base vs same-family sibling | 3 seeds, prompt digests, verified bf16, no adapter | 6 | **awaiting user assessment**; arms differ by mean 51.6–63.5 |
 
 Baseline A and baseline B differ in resolution, cfg and flow shift; rows are only
 comparable inside one of them.
@@ -153,6 +154,8 @@ region the model reaches for smooth rather than structured.
 | Asked for | Status |
 |---|---|
 | verified native-precision control | **DONE — bundle 20, and it closes precision** |
+| base-only capability gate | **PARTIAL — bundle 21**: full framing only, and no dedicated-fill arm (gated download, no token) |
+| evidence audit of the training set | **manifest built — bundle 21**, 27 crops at the trainer's largest bucket, awaiting labels |
 | officially-prepared scaled-FP8 | not run; secondary to the above |
 | tighter framing that **contains the region** | **not run** — see the correction below |
 | targeted or focus-masked adaptation | not run — blocked on verified evidence of the region |
