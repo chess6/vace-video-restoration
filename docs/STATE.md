@@ -209,10 +209,10 @@ none helped, edge energy fell in all 30).
 **Precision is EXCLUDED on a measurement** (20): `default` loads 100% bfloat16,
 `fp8_e4m3fn` 100% float8, and regenerating at `default` reproduced bundle 18
 bit-for-bit. **Probe the loaded model; never trust a name or a loader flag.** **THE ADAPTER PARTIALLY FIXES THE REGION** — base-only is
-*worse* there — but **the base and its same-family sibling BOTH fail a base-only
-structural gate** (21, 3 seeds, verified bf16). The family has no usable prior
-here; adaptation lifts off a floor rather than repairing a near-miss. Decisive
-and untested: a different architecture, or a model trained to fill from context.
+*worse* there — but **both TESTED checkpoints fail a base-only structural gate**
+(21; two of two is not the lineage). Its ceiling is low **under the current data
+and training design** — not a claim about adaptation at large while the evidence
+audit is unrun. Untested, decisive: another architecture, or one trained to fill.
 
 Never audited: whether training material holds usable evidence of the region
 *after* trainer resize and crop — until it does, "cannot draw it" and "was never
