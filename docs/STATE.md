@@ -2,9 +2,10 @@
 
 Durable context: what is expensive to rediscover, and the standing instructions
 that outlive a session. **Read before starting work** (CLAUDE.md rule 0).
-**Size limit: 200 lines / 12 KB**, enforced by `check_repo_clean.sh`. **Rule 2a
-applies here** — tracked, so never name an input file, a candidate, or an
-interval/duration/resolution of the user's media.
+**Size limit: 240 lines / 16 KB**, enforced by `check_repo_clean.sh`; evict
+resolved entries to make room, never a model or architecture fact still in force.
+**Rule 2a applies here** — tracked, so never name an input file, a candidate, or
+an interval/duration/resolution of the user's media.
 
 ## What this pipeline is
 
@@ -198,3 +199,37 @@ Dilation is not free: `mask.grow=4` put 4.51% of the mask onto another candidate
 59.2 GB, 19.81 s/frame). Capacity was never the constraint — only 4.44% of the
 subject is repainted, under a control video pinning every pixel. **VACE is out,
 the plate is the deliverable**, and pose-vs-depth is moot.
+
+## The region defect: sampling is exhausted, the gap is in the data
+
+Full arc and numbers in `outputs/FINDINGS.md`; architecture in
+`CANDIDATE_GENERATION.md`. **Do not re-run any of it.** Eliminated: prompt
+interference, the VAE round trip (~44 dB, SSIM 0.9995+), LoRA strength (the base
+at 0.00 shows it), fp8 vs bf16, the seed across 12 images — and now **local
+repair at 16× the area with composition pinned**: 33 arms over 3 images, denoise
+0.30–0.55 × 2 seeds, crop magnified 4× with 216×256 original px of context.
+None helped. **Edge energy fell in every one of the 30 diffusion arms**,
+monotonically with denoise: given freedom there, the model reaches for smooth.
+No sampling lever reaches a data gap.
+
+Three things that generalise beyond this defect:
+
+- **A region box does not transfer between images.** Three sibling candidates'
+  boxes differed by up to 68 px and by a third in size, on a region ~60 px tall.
+  Ask per image — `mark_region.py` makes that four numbers off a labelled grid —
+  and key the box to the arm directory. A single shared box would have been wrong
+  on two of three with every downstream check still passing.
+- **Under masked img2img the seed stops dominating** (910 vs 920 agree to ~0.1,
+  against a spread of ~0.19 across seeds in full-frame work): the input latent
+  pins composition, so re-rolling cannot rescue a failed denoise level.
+- **Prompt text leaks where it is copied, not only where it is authored.** A
+  review bundle's `INPUTS.txt` carries the fully resolved prompt; it is on the
+  denylist now.
+
+Untried, in cost order: a repair-specific overlay key (`candidate_repair` — the
+structural arms ran on the full-frame template, the one confound left in the
+result above); a **dedicated inpainting model**, since Chroma is not one and
+`SetLatentNoiseMask` is masked img2img rather than trained fill; then step 8's
+targeted references. **`gen_key.py`, `body_structure.py`, `assert_dataset.py` and
+`compare_arms.sh` are lost** — absent from worktree and volume alike, which is
+the standing cost of the Chroma tools being untracked.

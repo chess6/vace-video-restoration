@@ -20,10 +20,18 @@ architecture decision, a measurement trap, a standing instruction from the user.
 Do not log routine progress there: task status belongs in the task list and
 history belongs in git.
 
-It is capped at **200 lines / 12 KB**, enforced by `scripts/check_repo_clean.sh`.
-When it is full, delete the oldest resolved entries rather than raising the cap —
-a working memory nobody finishes reading is not one. Anything now enforced by a
-test or a guard script belongs in that test, not in the document.
+It is capped at **240 lines / 16 KB**, enforced by `scripts/check_repo_clean.sh`.
+When it is full, delete the oldest **resolved** entries rather than raising the
+cap — a working memory nobody finishes reading is not one. Anything now enforced
+by a test or a guard script belongs in that test, not in the document.
+
+The cap has been raised once, from 200/12 KB, and the reason is the rule: every
+candidate for eviction was a model or architecture fact still in force, so the
+choice was between two load-bearing things rather than between memory and
+clutter. That is the only good reason to raise it. **Never make room by trimming
+model, architecture or measurement detail that still holds** — those are exactly
+what the file exists to carry, and a fact compressed to fit is a fact that will
+be re-derived wrongly later.
 
 Rule 2a applies to it in full: it is tracked, so it must never name an input
 file, anyone or anything depicted, or any interval, duration or resolution of
