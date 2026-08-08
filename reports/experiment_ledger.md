@@ -138,9 +138,35 @@ Which of the four candidate causes owns this failure:
 | Candidate | Verdict |
 |---|---|
 | Quantisation | **EXCLUDED, on a measurement.** Bundle 20. |
-| The current subject adapter | **Not the sole or necessary cause.** Not "excluded": see below. |
-| Base-model capability | **Strongly implicated, one confound outstanding.** |
-| Absent training evidence | **Open and never audited.** |
+| The current subject adapter | **REFUTED as a cause. It partially FIXES the region.** |
+| Base-model capability | **CONFIRMED as the failing component.** |
+| Absent training evidence | **Open, never audited — and now the indicated lever.** |
+
+### The decision, and what changed it
+
+Bundle 20 asked the one question that had never been asked with everything else
+held: the same seed, the same prompt digests, the same *verified* dtype, and the
+only difference being whether the adapter is in the graph at all.
+
+**The bare base model is WORSE in the region than the adapted one.** So the
+adapter is not aggravating the defect — it is partially correcting it, and the
+"adapter aggravation" hypothesis is refuted rather than merely unmeasured.
+
+That inverts the reading this project had been carrying. The previous story was
+that the base model has a gap no sampling lever reaches, which pointed at
+replacing the model. The evidence now says something more useful: **adaptation is
+demonstrably the lever that moves this region.** It moved it in the right
+direction with a dataset that was never built to contain it and never audited for
+whether it does.
+
+Two readings remain, and they are not separable from these images:
+
+- the adapter learned something specific about the region, in which case
+  targeted evidence should move it further;
+- the adapter improved the subject generally and the region came along, in which
+  case the ceiling may be lower.
+
+Either way the next move is the same, and it is not a model swap.
 
 ### Two verdicts corrected under review
 
@@ -208,10 +234,31 @@ recommendations follow from this ledger rather than from preference:
   differ in flow shift and the higher-scoring one used the sampler default; a
   third value has no measurement behind it in this project.
 
-**The region is a scoped exception, not a reason to replace the stack.** The
-generator is good at everything except one small region. The proportionate next
-step is a purpose-built masked-fill model applied to that region alone, keeping
-the surrounding image, because the current graph performs masked img2img rather
-than trained fill. Replacing the base model is justified only if that also fails,
-and any replacement must pass a capability gate on the region — base weights
-only, no adapter port — before any training is planned for it.
+**The region is a scoped exception, not a reason to replace the stack** — and
+bundle 20 strengthens that considerably. The base model is the failing component,
+but the adapter *improves* the region, so the stack is not at a hard ceiling: the
+one lever demonstrated to move this region is adaptation, applied to a dataset
+that was never built to contain the region and has never been checked for whether
+it does.
+
+The ordered next steps, cheapest and most informative first:
+
+1. **Audit the training evidence.** Whether verified source material contains
+   usable evidence of the region *after* the trainer's resize and crop is
+   unknown, and it is the difference between "the ceiling is the model" and "the
+   ceiling is the dataset". It costs no GPU. It cannot be done by inspecting the
+   media — see the media-inspection prohibition — so it takes the form of a
+   manifest the user reviews, or minimal per-crop presence labels.
+2. **If evidence exists**: a region-aware or focus-masked adaptation against the
+   existing combined design, compared at equal optimizer updates. Rank 16 against
+   rank 32 only after that, and only on identical data.
+3. **If it does not**: subject-specific accuracy cannot be learned from the
+   current dataset, and that must be stated rather than worked around. The
+   fallbacks are a purpose-built masked-fill model for the region alone — the
+   current graph does masked img2img, not trained fill — or new source material.
+
+**A base-model bakeoff is not indicated by this evidence.** It was the right plan
+when the reading was "the base cannot draw it and nothing moves it". The adapter
+moves it. Replacing the base would discard the one component demonstrated to
+help, and would require re-establishing subject adaptation from scratch on a new
+stack before the region could even be assessed.

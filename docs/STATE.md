@@ -206,13 +206,13 @@ evidence: prompt interference, the VAE (~44 dB), the seed across 12
 images, and **local repair at 16× the area with composition pinned** (33 arms,
 none helped, edge energy fell in all 30).
 
-**Two things earlier revisions wrongly called excluded.** *Precision is
-unverified*: no runtime dtype was captured, so the labels are a directory name
-and a loader argument, and that the arms differed visibly proves *something*
-differed rather than which dtype either ran at — a proxy standing in for the
-thing itself. *The adapter is not necessary* (the bare base shows it) *but may
-aggravate*: severity was never compared at fixed seed, and no metric here detects
-the defect, so "worse" was never measurable.
+**Precision is EXCLUDED on a measurement** (bundle 20): declared `default` loads
+100% bfloat16, `fp8_e4m3fn` 100% float8, and regenerating at `default` reproduced
+bundle 18 bit-for-bit. **Probe the loaded model; never trust a directory name or
+a loader argument.** **THE ADAPTER PARTIALLY FIXES THE REGION** — base-only at
+the same seed, prompt and verified dtype is *worse* there — so aggravation is
+refuted, the base is the failing component, and adaptation is the only lever
+shown to move it. That points at the dataset, not at a model swap.
 
 Never audited: whether training material holds usable evidence of the region
 *after* trainer resize and crop — until it does, "cannot draw it" and "was never
