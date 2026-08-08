@@ -16,6 +16,68 @@ baselines are not an A/B.
 
 ---
 
+## Summary
+
+A region of a generated candidate — about **0.3% of the frame area** — renders
+malformed while the subject is otherwise correct. Thirteen bundles, 150+ arms.
+
+**What is excluded, on evidence**
+
+| | how |
+|---|---|
+| Prompt / negative interference | ablation; emptying the negative made it *worse* |
+| The VAE round trip | encode→decode, two scales: ~44 dB, SSIM 0.9995+ |
+| The seed | 12 images, 6 seeds × 2 precisions; none clean |
+| Quantisation | runtime telemetry + a **bit-identical** native-precision control |
+| Resolution / locality | local repair at **16× the area**, composition pinned, 5 denoise levels, 33 arms |
+| Adapter aggravation | base-only vs adapted, everything else held — **the reverse is true** |
+
+**What is confirmed**
+
+**The base model is the failing component**, and **the subject adapter partially
+corrects the region** — the bare base, at the same seed, prompt and verified
+dtype with no adapter node in the graph, is *worse* there.
+
+Those two facts together are the finding. The obvious reading of everything
+before them was "the model cannot draw this, so replace the model". That reading
+is wrong: something does move it, and it is adaptation — achieved with a dataset
+that was never built to contain the region and has never been checked for whether
+it does.
+
+**What is open**
+
+Whether the training material holds usable evidence of the region **after the
+trainer's resize and crop**. Never audited. It is the difference between "the
+ceiling is the model" and "the ceiling is the dataset", it costs no GPU, and it
+is the recommended next step. It cannot be done by inspecting the media, so it
+takes the form of a manifest the user reviews.
+
+**A base-model bakeoff is not indicated.** It would discard the one component
+shown to help and require rebuilding subject adaptation on a new stack before the
+region could even be assessed.
+
+### Method notes, which cost more than the results did
+
+- **No metric in this project detects this defect.** Keypoint completeness
+  returned full marks on images reported as malformed; edge density scored the
+  worst-looking arm highest. Every judgement here is the user's, and any
+  replacement metric must first be validated against images known to be bad.
+- **The same metric misled in both directions.** 17/17 read as "well formed"; 7/17
+  read as "a close shot" when it meant ten keypoints were *outside the frame*.
+  Completeness measures what is detectable, span measures how large — neither
+  reports what is in shot.
+- **A region box does not transfer between images.** Three sibling candidates'
+  boxes differed by up to 68 px and by a third in size.
+- **Under masked img2img the seed stops dominating**, because the input latent
+  pins composition — so re-rolling cannot rescue a failed denoise level.
+- **Verify a dtype by probing the loaded model.** A declared dtype is a request,
+  not a receipt; and "the outputs look different, so the dtypes differed" does
+  not establish *which* dtype either arm ran at.
+- **Two claims in this file were withdrawn under review**, and both are kept
+  below with their original reasoning, because the corrections are the point.
+
+---
+
 ## The defect
 
 A region of a generated candidate that renders as blob-like or blurred, in a
