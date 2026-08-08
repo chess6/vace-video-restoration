@@ -88,20 +88,37 @@ def sharpness(im: Image.Image) -> float:
 # ---------------------------------------------------------------------------
 
 def get_anchor_app(log):
-    # Resolved by ROLE through scripts/backends.py; the binding lives in an
-    # untracked config (CLAUDE.md rules 2a, 2c). See backends.anchor_embedder.
+    """The anchor-embedding backend, or terminate the stage.
+
+    Resolved by ROLE through scripts/backends.py; the binding lives in an
+    untracked config (CLAUDE.md rules 2a, 2c).
+
+    THIS USED TO FALL BACK and that was a silent-degradation bug of exactly the
+    kind this project keeps paying for. On a missing or malformed binding it
+    logged a warning, returned None, and the stage carried on with candidate-box
+    heuristics and no match clustering — producing a reference set that looks
+    like every other reference set, with the one step that decides WHICH
+    candidate is the target quietly not having happened. STATE.md's rule is that
+    match is resolved by one bank and nothing else may decide it; a heuristic
+    fallback is something else deciding it.
+
+    A missing binding is a configuration error, not a data condition. It is not
+    the same as an ordinary per-image detection failure, which stays non-fatal
+    and is handled per image by the callers of this backend: a backend that
+    loaded fine and found no anchor in one reference is information, whereas a
+    backend that never loaded makes every such report meaningless.
+    """
+    import backends          # BackendUnavailable propagates: see the docstring
     try:
-        import backends
         import onnxruntime as ort
-        providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
-                     if "CUDAExecutionProvider" in ort.get_available_providers()
-                     else ["CPUExecutionProvider"])
-        return backends.anchor_embedder(providers=providers, log=log)
-    except Exception as e:
-        log.warning("Anchor embedding backend unavailable (%s). Falling back to "
-                    "candidate-box heuristics only; match clustering will be "
-                    "skipped.", e)
-        return None
+    except ImportError as e:
+        raise backends.BackendUnavailable(
+            f"onnxruntime is not installed, so the anchor backend cannot run: {e}"
+        ) from e
+    providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
+                 if "CUDAExecutionProvider" in ort.get_available_providers()
+                 else ["CPUExecutionProvider"])
+    return backends.anchor_embedder(providers=providers, log=log)
 
 
 def detect_candidate_boxes(images: list[Image.Image], log) -> list[list[tuple]]:
@@ -323,44 +340,46 @@ def main() -> int:
                 r["box"] = None
 
     # ---- anchor embedding + match clustering -------------------------------
+    # No `if app is not None` guard any more: get_anchor_app raises rather than
+    # returning None, so reaching this line means the backend is real. The guard
+    # was what let a missing binding skip clustering silently.
+    #
+    # `if anchors:` below is the OTHER case and is correctly non-fatal — the
+    # backend ran on this reference and found nothing, which is a fact about the
+    # reference, not about the configuration.
     app = get_anchor_app(log)
-    if app is not None:
-        import cv2
-        for r in kept:
-            bgr = cv2.cvtColor(np.asarray(r["im"]), cv2.COLOR_RGB2BGR)
-            anchors = app.get(bgr)
-            if anchors:
-                f = max(anchors, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
-                r["anchor_box"] = tuple(float(v) for v in f.bbox)
-                emb = np.asarray(f.normed_embedding, dtype=np.float32)
-                r["anchor_emb"] = emb
-            else:
-                r["anchor_box"] = None
-                r["anchor_emb"] = None
-
-        embs = [r for r in kept if r.get("anchor_emb") is not None]
-        if len(embs) >= 2:
-            # dominant match = the anchor most similar to all the others
-            M = np.stack([r["anchor_emb"] for r in embs])
-            sim = M @ M.T
-            medoid = int(np.argmax(sim.sum(axis=1)))
-            ref_emb = M[medoid]
-            for r in embs:
-                r["id_sim"] = float(ref_emb @ r["anchor_emb"])
-            outliers = [r for r in embs if r["id_sim"] < args.match_threshold]
-            for r in outliers:
-                log.warning("REJECT %s: anchor similarity %.3f to the dominant match "
-                            "is below %.2f - this looks like a different candidate.",
-                            r["path"].name, r["id_sim"], args.match_threshold)
-            kept = [r for r in kept if r not in outliers]
-            log.info("Match clustering: dominant anchor from %s, %d image(s) kept",
-                     embs[medoid]["path"].name, len(kept))
+    import cv2
+    for r in kept:
+        bgr = cv2.cvtColor(np.asarray(r["im"]), cv2.COLOR_RGB2BGR)
+        anchors = app.get(bgr)
+        if anchors:
+            f = max(anchors, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
+            r["anchor_box"] = tuple(float(v) for v in f.bbox)
+            emb = np.asarray(f.normed_embedding, dtype=np.float32)
+            r["anchor_emb"] = emb
         else:
-            log.info("Fewer than 2 anchors detected; skipping match clustering.")
-    else:
-        for r in kept:
             r["anchor_box"] = None
             r["anchor_emb"] = None
+
+    embs = [r for r in kept if r.get("anchor_emb") is not None]
+    if len(embs) >= 2:
+        # dominant match = the anchor most similar to all the others
+        M = np.stack([r["anchor_emb"] for r in embs])
+        sim = M @ M.T
+        medoid = int(np.argmax(sim.sum(axis=1)))
+        ref_emb = M[medoid]
+        for r in embs:
+            r["id_sim"] = float(ref_emb @ r["anchor_emb"])
+        outliers = [r for r in embs if r["id_sim"] < args.match_threshold]
+        for r in outliers:
+            log.warning("REJECT %s: anchor similarity %.3f to the dominant match "
+                        "is below %.2f - this looks like a different candidate.",
+                        r["path"].name, r["id_sim"], args.match_threshold)
+        kept = [r for r in kept if r not in outliers]
+        log.info("Match clustering: dominant anchor from %s, %d image(s) kept",
+                 embs[medoid]["path"].name, len(kept))
+    else:
+        log.info("Fewer than 2 anchors detected; skipping match clustering.")
 
     if not kept:
         log.error("All reference images were rejected.")

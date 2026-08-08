@@ -30,6 +30,7 @@ import argparse
 import json
 import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -45,7 +46,16 @@ from common import (  # noqa: E402
 # not only ours). Derived from the bound label map rather than written out:
 # the ids are stable but enumerating the labels names the subject's category,
 # and a hardcoded range silently goes wrong if the binding ever changes.
-CANDIDATE_IDS = {i for i in backends.attribute_labels() if i != 0}
+@lru_cache(maxsize=None)
+def candidate_ids() -> set:
+    """Every parser class except background.
+
+    RESOLVED LAZILY, NOT AT IMPORT. This was a module-level constant, so
+    `import make_occluders` raised on any machine without the untracked binding —
+    a fresh checkout could not even collect the tests. It still fails loud; it
+    just fails when the stage needs it rather than when Python reads the file.
+    """
+    return {i for i in backends.attribute_labels() if i != 0}
 
 # Depth Anything returns relative INVERSE depth, normalised per shot by
 # make_depth.py, so a brighter pixel is a NEARER one. Everything below depends on
@@ -179,7 +189,7 @@ def main() -> int:
             subj = cv2.cvtColor(m, cv2.COLOR_BGR2GRAY) > 127
             rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
             labels = parser.parse(Image.fromarray(rgb))
-            candidates = np.isin(labels, list(CANDIDATE_IDS))
+            candidates = np.isin(labels, list(candidate_ids()))
             # Anyone who is a candidate but not our tracked subject. Eroding the
             # subject side slightly avoids labelling the subject's own outline
             # as an occluder purely from parser/tracker disagreement.

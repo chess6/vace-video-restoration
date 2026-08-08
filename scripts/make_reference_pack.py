@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -69,14 +70,37 @@ from common import (  # noqa: E402
 # every clone carries. backends.py fails loud if the binding is absent - it does
 # not substitute a parser, because a different label map silently remaps every
 # region this stage reasons about.
-_PARSER = backends.binding("attribute_parser")
-SEGFORMER_ID = _PARSER["id"]
-SEGFORMER_REV = _PARSER["revision"]
+# RESOLVED LAZILY, NOT AT IMPORT. These used to be module-level constants, which
+# meant `import make_reference_pack` raised BackendUnavailable on any machine
+# without the untracked binding — including a fresh checkout, so the unit tests
+# could not run at all without private configuration. Resolution now happens on
+# first use, i.e. at stage startup, which is where a configuration error belongs.
+#
+# Still fail-loud: these raise exactly as before, just later and only if the
+# stage actually needs them. Nothing defaults.
+@lru_cache(maxsize=None)
+def parser_binding() -> dict:
+    return backends.binding("attribute_parser")
 
-LBL = backends.attribute_labels()
-ATTRIBUTE = backends.label_group("attribute")
-EXPOSED = backends.label_group("exposed")
-# What an EXTERNAL reference is allowed to condition.
+
+@lru_cache(maxsize=None)
+def label_map() -> dict:
+    """id -> role name. NOT called `labels`: that is a parameter name all over
+    this module for the parsed label ARRAY, and shadowing it silently turns a
+    lookup into a call on a numpy array."""
+    return backends.attribute_labels()
+
+
+@lru_cache(maxsize=None)
+def group(name: str) -> set:
+    """A named label group: attribute, exposed, match_only, anchor_region, covering."""
+    return backends.label_group(name)
+
+
+# The rationale for each group stays here, beside the accessor, because it is the
+# reasoning a reader needs and it is category-neutral.
+#
+# WHAT AN EXTERNAL REFERENCE MAY CONDITION - group("match_only").
 #
 # Narrowed to the anchor region only. The peripheral extents were in this set on
 # the reasoning that an exposed region is "match", but they are not: how much of a
@@ -86,21 +110,18 @@ EXPOSED = backends.label_group("exposed")
 # belongs to the source, exactly like the attribute itself.
 #
 # Accessory classes stay out too - they are attributes of another day.
-MATCH_ONLY = backends.label_group("match_only")
-
-# The anchor region's classes, used to ask what the SOURCE actually exposes before
-# any external anchor is allowed to condition anything. A covering in the source is
-# part of the attribute the candidate presents; an external reference showing it
-# uncovered must never be read as permission to remove it.
-ANCHOR_REGION = backends.label_group("anchor_region")
-COVERING = backends.label_group("covering")
+#
+# group("anchor_region") and group("covering") ask what the SOURCE actually
+# exposes before any external anchor is allowed to condition anything. A covering
+# in the source is part of the attribute the candidate presents; an external
+# reference showing it uncovered must never be read as permission to remove it.
 
 
 def match_regions(labels: np.ndarray, allowed: set | None = None,
                      keep: set | None = None) -> np.ndarray:
     """Boolean mask of the pixels of an external reference that may be shown.
 
-    `allowed` narrows MATCH_ONLY further for one shot. It is how a covered
+    `allowed` narrows group("match_only") further for one shot. It is how a covered
     source anchor is protected: with the anchor class removed, an external
     reference showing it uncovered contributes the surrounding class and nothing
     else, so it cannot instruct the model to take the covering off. It can only
@@ -117,8 +138,8 @@ def match_regions(labels: np.ndarray, allowed: set | None = None,
     if keep is not None:
         names = set(keep)
     else:
-        names = MATCH_ONLY if allowed is None else (set(allowed) & MATCH_ONLY)
-    ids = [i for i, n in LBL.items() if n in names]
+        names = group("match_only") if allowed is None else (set(allowed) & group("match_only"))
+    ids = [i for i, n in label_map().items() if n in names]
     return np.isin(labels, ids)
 
 
@@ -193,9 +214,9 @@ class Parser:
         self.dev = "cuda" if torch.cuda.is_available() else "cpu"
         log.info("Loading attribute parser")
         self.proc = SegformerImageProcessor.from_pretrained(
-            SEGFORMER_ID, revision=SEGFORMER_REV)
+            parser_binding()["id"], revision=parser_binding()["revision"])
         self.model = AutoModelForSemanticSegmentation.from_pretrained(
-            SEGFORMER_ID, revision=SEGFORMER_REV).to(self.dev).eval()
+            parser_binding()["id"], revision=parser_binding()["revision"]).to(self.dev).eval()
 
     def parse(self, pil):
         """Returns a HxW label map at the image's own resolution."""
@@ -232,8 +253,8 @@ def palette(rgb: np.ndarray, labels: np.ndarray) -> dict:
     lab = cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
     out = {}
     total = labels.size
-    for idx, name in LBL.items():
-        if name not in ATTRIBUTE:
+    for idx, name in label_map().items():
+        if name not in group("attribute"):
             continue
         m = labels == idx
         n = int(m.sum())
@@ -783,7 +804,7 @@ def main() -> int:
                         "conditioning is disabled; only the surrounding class is "
                         "conditioned, so an uncovered reference cannot instruct "
                         "the model to take the covering off.", sid)
-        allowed = MATCH_ONLY if anchor_ok else (MATCH_ONLY - {"face"})
+        allowed = group("match_only") if anchor_ok else (group("match_only") - {"face"})
         log.info("%s: external references may condition %s (source anchor %s)",
                  sid, "+".join(sorted(allowed)) or "NOTHING",
                  "exposed" if anchor_ok else "covered/unknown")

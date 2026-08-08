@@ -152,22 +152,31 @@ class Models:
         # reads the binding from an untracked config (CLAUDE.md rules 2a, 2c).
         # A pretrained model is named after what it was trained to find, so the
         # model id used to state the subject's category right here.
+        # THIS USED TO FALL BACK to "flag the shot for manual seeding", which
+        # sounds conservative and is not: a missing binding is a configuration
+        # error the operator can fix in seconds, and converting it into a
+        # per-shot data condition buries it in a warning line inside a stage
+        # that then keeps running. Every shot gets flagged, the flags look like
+        # ordinary tracking difficulty, and the actual cause — no backend — is
+        # indistinguishable from a hard shot. It raises now.
+        #
+        # An ordinary per-image detection failure is a different thing and stays
+        # non-fatal: the backend loaded, ran, and found no anchor in this frame.
+        # That is data. This is configuration.
         if self._anchor is None:
+            import backends      # BackendUnavailable propagates, deliberately
             try:
-                import backends
                 import onnxruntime as ort
-                cuda_ok = "CUDAExecutionProvider" in ort.get_available_providers()
-                providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
-                             if cuda_ok else ["CPUExecutionProvider"])
-                self._anchor = backends.anchor_embedder(providers=providers,
-                                                        log=self.log)
-            except Exception as e:
-                self.log.warning("Anchor embedding backend unavailable (%s). "
-                                 "Match cannot be established at all; shots will "
-                                 "be flagged for manual seeding rather than "
-                                 "guessed.", e)
-                self._anchor = False
-        return self._anchor or None
+            except ImportError as e:
+                raise backends.BackendUnavailable(
+                    f"onnxruntime is not installed, so match cannot be "
+                    f"established for any shot: {e}") from e
+            cuda_ok = "CUDAExecutionProvider" in ort.get_available_providers()
+            providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
+                         if cuda_ok else ["CPUExecutionProvider"])
+            self._anchor = backends.anchor_embedder(providers=providers,
+                                                    log=self.log)
+        return self._anchor
 
     def sam(self):
         if self._sam is None:

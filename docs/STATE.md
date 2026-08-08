@@ -200,17 +200,23 @@ Dilation is not free: `mask.grow=4` put 4.51% of the mask onto another candidate
 subject is repainted, under a control video pinning every pixel. **VACE is out,
 the plate is the deliverable**, and pose-vs-depth is moot.
 
-## The region defect: sampling is exhausted, the gap is in the data
+**The region defect: cause not yet established.** Ledger in
+`reports/experiment_ledger.md`; do not re-run completed arms. Excluded on
+evidence: prompt interference, the VAE (~44 dB), the seed across 12
+images, and **local repair at 16× the area with composition pinned** (33 arms,
+none helped, edge energy fell in all 30).
 
-Full arc and numbers in `outputs/FINDINGS.md`; architecture in
-`CANDIDATE_GENERATION.md`. **Do not re-run any of it.** Eliminated: prompt
-interference, the VAE round trip (~44 dB, SSIM 0.9995+), LoRA strength (the base
-at 0.00 shows it), fp8 vs bf16, the seed across 12 images — and now **local
-repair at 16× the area with composition pinned**: 33 arms over 3 images, denoise
-0.30–0.55 × 2 seeds, crop magnified 4× with 216×256 original px of context.
-None helped. **Edge energy fell in every one of the 30 diffusion arms**,
-monotonically with denoise: given freedom there, the model reaches for smooth.
-No sampling lever reaches a data gap.
+**Two things earlier revisions wrongly called excluded.** *Precision is
+unverified*: no runtime dtype was captured, so the labels are a directory name
+and a loader argument, and that the arms differed visibly proves *something*
+differed rather than which dtype either ran at — a proxy standing in for the
+thing itself. *The adapter is not necessary* (the bare base shows it) *but may
+aggravate*: severity was never compared at fixed seed, and no metric here detects
+the defect, so "worse" was never measurable.
+
+Never audited: whether training material holds usable evidence of the region
+*after* trainer resize and crop — until it does, "cannot draw it" and "was never
+shown it" are indistinguishable from outputs alone.
 
 Three things that generalise beyond this defect:
 
@@ -222,9 +228,8 @@ Three things that generalise beyond this defect:
 - **Under masked img2img the seed stops dominating** (910 vs 920 agree to ~0.1,
   against a spread of ~0.19 across seeds in full-frame work): the input latent
   pins composition, so re-rolling cannot rescue a failed denoise level.
-- **Prompt text leaks where it is copied, not only where it is authored.** A
-  review bundle's `INPUTS.txt` carries the fully resolved prompt; it is on the
-  denylist now.
+- **Prompt text leaks where it is COPIED, not only where authored** — a review
+  bundle's inputs record carried the resolved prompt; denylisted now.
 
 Untried, in cost order: a repair-specific overlay key (`candidate_repair` — the
 structural arms ran on the full-frame template, the one confound left in the

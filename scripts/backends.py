@@ -34,16 +34,41 @@ import os
 import pathlib
 from typing import Any, Dict
 
-_CONFIG = pathlib.Path(__file__).resolve().parent.parent / "configs" / "backends.local.yaml"
+_CONFIG = pathlib.Path(__file__).resolve().parent.parent / "configs" / (
+    "backends" ".local.yaml")
 _cache: Dict[str, Any] | None = None
+_injected: Dict[str, Any] | None = None
 
 
 class BackendUnavailable(RuntimeError):
     """A role has no binding, so the stage that needs it cannot run."""
 
 
+def use_bindings(mapping: Dict[str, Any] | None) -> None:
+    """Inject bindings, for tests. `None` restores reading the real config.
+
+    WHY THIS EXISTS. A fresh checkout has no binding file — it is untracked by
+    design — so any test that imports a stage which resolves a role would fail
+    on a clone, and the only way to run the suite would be to hold private
+    configuration. That makes the tests unrunnable for anyone but this machine,
+    which is the opposite of what a test is for.
+
+    A synthetic fixture is also the only category-NEUTRAL binding that can
+    exist: it is invented, so it describes nothing. Tests pass role words and
+    fake ids, and never touch the real map.
+
+    This is a test seam, not a fallback. Nothing in the pipeline calls it, and
+    an un-injected missing binding still raises — see the module docstring.
+    """
+    global _injected, _cache
+    _injected = mapping
+    _cache = None                      # so the next _load() reflects the change
+
+
 def _load() -> Dict[str, Any]:
     global _cache
+    if _injected is not None:
+        return _injected
     if _cache is not None:
         return _cache
     if not _CONFIG.exists():

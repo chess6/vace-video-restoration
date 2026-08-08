@@ -129,6 +129,11 @@ fi
 say "Verifying"
 scripts/verify_env.sh || warn "verify_env.sh reported problems (see above)"
 venv/bin/python scripts/test_chunking.py || warn "chunking tests FAILED"
+# Runs here specifically because bootstrap is the FRESH-CHECKOUT path, and this
+# test's whole claim is that a fresh checkout works without private
+# configuration: the stages must import with no backend binding present, and
+# must still refuse to run rather than degrade once they need one.
+venv/bin/python scripts/test_backend_fail_loud.py || warn "backend fail-loud tests FAILED"
 scripts/check_no_display.sh >/dev/null && ok "no-display rule holds"
 
 say "Done"

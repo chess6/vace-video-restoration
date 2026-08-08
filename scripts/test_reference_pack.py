@@ -39,10 +39,21 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import composite_key, file_digest, generation_key  # noqa: E402
 from make_reference_pack import (  # noqa: E402
-    ATTRIBUTE, MATCH_ONLY, LBL, anchor_orientation, build_panel_images,
+    anchor_orientation, build_panel_images,
     consensus_match, match_regions, mask_to_match, score_match,
 )
 from run_chunks import needs_run, settled_status  # noqa: E402
+
+# Resolved lazily now: these used to be module constants in
+# make_reference_pack, which made importing it require the untracked
+# binding. Accessors keep the fail-loud behaviour and move it to first use.
+from make_reference_pack import group as _group, label_map as _label_map  # noqa: E402
+
+
+def ATTRIBUTE(): return _group("attribute")
+def MATCH_ONLY(): return _group("match_only")
+def LBL(): return _label_map()
+
 
 ATTRIBUTE_RGB = (200, 30, 40)     # a loud colour, so any leak is unmistakable
 EXPOSED_RGB = (170, 130, 110)
@@ -63,8 +74,8 @@ def synthetic_reference(h=64, w=48):
     labels = np.zeros((h, w), dtype=np.uint8)
     rgb = np.zeros((h, w, 3), dtype=np.uint8)
     rgb[:, :] = BG_RGB
-    anchor_id = next(i for i, n in LBL.items() if n == "face")
-    upper_id = next(i for i, n in LBL.items() if n == "upper")
+    anchor_id = next(i for i, n in LBL().items() if n == "face")
+    upper_id = next(i for i, n in LBL().items() if n == "upper")
     labels[8:24, 12:36] = anchor_id
     rgb[8:24, 12:36] = EXPOSED_RGB
     labels[28:56, 8:40] = upper_id
@@ -77,13 +88,13 @@ def synthetic_reference(h=64, w=48):
 # ---------------------------------------------------------------------------
 
 def test_class_partition(f: Failures) -> None:
-    leaked = sorted(n for n in ATTRIBUTE if n in MATCH_ONLY)
+    leaked = sorted(n for n in ATTRIBUTE() if n in MATCH_ONLY())
     f.check(not leaked, f"attribute class(es) {leaked} are shown to the model")
 
-    ids = np.array(sorted(LBL), dtype=np.uint8).reshape(1, -1)
+    ids = np.array(sorted(LBL()), dtype=np.uint8).reshape(1, -1)
     shown = match_regions(ids)[0]
-    for i, name in LBL.items():
-        want = name in MATCH_ONLY
+    for i, name in LBL().items():
+        want = name in MATCH_ONLY()
         f.check(bool(shown[i]) == want,
                 f"class {name!r}: shown={bool(shown[i])}, expected {want}")
 
@@ -501,7 +512,9 @@ def test_peripheral_extents_are_not_match(f: Failures) -> None:
     carries. A reference showing more of one instructs the model to expose more,
     which uncovers what the source covers.
     """
-    from make_reference_pack import ANCHOR_REGION, ATTRIBUTE, COVERING, MATCH_ONLY
+    from make_reference_pack import group
+    ANCHOR_REGION, COVERING = group("anchor_region"), group("covering")
+    ATTRIBUTE, MATCH_ONLY = group("attribute"), group("match_only")
     for part in ("left_arm", "right_arm", "left_leg", "right_leg"):
         f.check(part not in MATCH_ONLY,
                 f"{part} is still conditioned from external references; how much "
