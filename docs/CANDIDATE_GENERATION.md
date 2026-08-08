@@ -120,11 +120,11 @@ Built by `make_lora_dataset.py`, then two additions:
      means a cut-off body, poisoning the exact words needed at inference.
 
 **The split is by source image, and pinned.** `pin_holdout.py` fixes the
-held-out set; `assert_dataset.py` fails if any training crop derives from a
-held-out source, or if any crop lacks a caption. Both matter because adding
-references reshuffles a ranking-based split, which once moved a previously
-trained image into the bank and would have made every recorded number
-incomparable. The held-out bank is the measuring instrument: it must stay still
+held-out set; `assert_dataset.py` (**lost**, see below) failed if any training
+crop derived from a held-out source, or if any crop lacked a caption. Both
+mattered because adding references reshuffles a ranking-based split, which once
+moved a previously trained image into the bank and would have made every recorded
+number incomparable. The held-out bank is the measuring instrument: it must stay still
 while the thing being measured changes.
 
 ## Judging
@@ -135,10 +135,11 @@ Two independent measurements. Neither alone is sufficient.
 against the **held-out split only**. Scoring against training material returns a
 high number by construction. Report **per candidate**, not group medians.
 
-**Structure** — `body_structure.py`, because match is an anchor embedding and
-cannot see a malformed extent. Keypoint completeness, extent symmetry, silhouette
-continuity (largest connected component over total foreground — catches a
-detached part that keypoints still find), and edge density. Writes a labelled
+**Structure** — `body_structure.py` (**lost**, see below), because match is an
+anchor embedding and cannot see a malformed extent. Keypoint completeness, extent
+symmetry, silhouette continuity (largest connected component over total
+foreground — catches a detached part that keypoints still find), and edge
+density. Writes a labelled
 contact sheet to disk.
 
 `edge_density_in_body` is **named for what it measures**. It is not "detail" and
@@ -246,9 +247,10 @@ should without being validated against images already known to be bad first.
 
 ## Provenance
 
-`gen_key.py` builds a content-addressed key from everything reaching the
-sampler: checkpoint, VAE, text encoder, LoRA **contents**, LoRA strength, prompt
-digests, seed, dimensions, steps, cfg, sampler, scheduler, flow shift, dataset
+`gen_key.py` (**lost**, see below) built a content-addressed key from everything
+reaching the sampler: checkpoint, VAE, text encoder, LoRA **contents**, LoRA
+strength, prompt digests, seed, dimensions, steps, cfg, sampler, scheduler, flow
+shift, dataset
 digest. Any input change yields a new key, so an older candidate can never be
 reattributed to a newer configuration — which seed-only resume detection allowed.
 
