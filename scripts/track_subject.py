@@ -8,7 +8,7 @@ Per shot:
   1. Sample representative frames.
   2. Detect every candidate with Grounding DINO (open-vocabulary).
   3. Score each candidate against the target's verified reference anchors
-     (scripts/reference_match.py) using ArcFace similarity ONLY.
+     (scripts/reference_match.py) using anchor-embedding similarity ONLY.
 
      Attributes-sensitive appearance similarity used to stand in when no anchor was
      visible. That is backwards: when the anchor cannot be seen is exactly when
@@ -148,21 +148,24 @@ class Models:
         return self._clip, self._clip_proc
 
     def anchor(self):
+        # The backend is resolved by ROLE through scripts/backends.py, which
+        # reads the binding from an untracked config (CLAUDE.md rules 2a, 2c).
+        # A pretrained model is named after what it was trained to find, so the
+        # model id used to state the subject's category right here.
         if self._anchor is None:
             try:
-                from insightface.app import FaceAnalysis
+                import backends
                 import onnxruntime as ort
                 cuda_ok = "CUDAExecutionProvider" in ort.get_available_providers()
                 providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
                              if cuda_ok else ["CPUExecutionProvider"])
-                app = FaceAnalysis(name="buffalo_l", providers=providers)
-                app.prepare(ctx_id=0 if cuda_ok else -1, det_size=(640, 640))
-                self._anchor = app
-                self.log.info("Anchor match: insightface buffalo_l (%s)", providers[0])
+                self._anchor = backends.anchor_embedder(providers=providers,
+                                                        log=self.log)
             except Exception as e:
-                self.log.warning("insightface unavailable (%s). Match cannot "
-                                 "be established at all; shots will be flagged "
-                                 "for manual seeding rather than guessed.", e)
+                self.log.warning("Anchor embedding backend unavailable (%s). "
+                                 "Match cannot be established at all; shots will "
+                                 "be flagged for manual seeding rather than "
+                                 "guessed.", e)
                 self._anchor = False
         return self._anchor or None
 

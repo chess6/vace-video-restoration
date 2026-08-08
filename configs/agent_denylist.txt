@@ -1,0 +1,94 @@
+# Paths an agent may not read (CLAUDE.md rule 2c).
+#
+# Single source of truth. Three things consume this file and must agree:
+#   .claude/settings.json    permissions.deny, blocking Read/Glob/Grep
+#   scripts/agent_guard.sh   PreToolUse hook, blocking Bash
+#   check_repo_clean.sh 8    verifies the two above still cover every line here
+#
+# WHAT BELONGS HERE, AND WHY IT IS NOT THE SAME LIST AS .gitignore
+# .gitignore answers "may this reach a remote". This file answers a different
+# question: "may an agent working in the worktree read this". The second list is
+# strictly larger, and the gap between them is exactly how rule 2a kept being
+# breached while every push check passed. A file can be untracked, unpushable and
+# still be the thing that tells an agent what the subject is - it only has to sit
+# in the working tree where a Read or a `cat` reaches it.
+#
+# Add a path here when reading it would reveal any of:
+#   * what KIND of thing the subject is
+#   * what this subject looks like, or what is depicted in the user's media
+#   * the conditioning text, the trigger token, or anything derived from them
+#   * a name, count or structure of the user's files
+#
+# PATTERNS are gitignore-style globs relative to the project root. Keep them
+# path-shaped: a pattern is project structure and is safe to track, whereas a
+# pattern built from a real filename would itself be the leak. Never write an
+# example derived from the user's material here.
+#
+# WHAT THIS DOES NOT DO. The pipeline still reads every one of these files - the
+# scripts must, or nothing runs. The block is at the agent's tool boundary, not
+# in the filesystem. An agent that needs one of these consulted asks the user to
+# run the command and report only the structural result.
+
+# ---- Conditioning text ------------------------------------------------------
+# Prompts, the trigger token, the detector's class prompt, the candidate grid.
+# A prompt works by describing the subject; see CLAUDE.md rule 2a.
+configs/prompt.local.yaml
+
+# ---- Backend bindings -----------------------------------------------------
+# Which pretrained model resolves the anchor, which parser labels attributes,
+# which backend supplies structure keypoints. A model's name says what it was
+# trained to find, so the name says what the subject is.
+configs/backends.local.yaml
+
+# ---- The guard's own vocabulary ---------------------------------------------
+# check_repo_clean.sh checks 6 and 6b work from a list of forbidden words, and
+# that list is a negative image of the subject: everything the project refuses
+# to say, enumerated. Reading it identifies the category outright, with no other
+# file needed - which is why the words are no longer in the tracked guard.
+configs/vocab.local.txt
+
+# ---- The user's material ----------------------------------------------------
+# Not just the pixels: the FILENAMES. Reference files are commonly named for
+# what they show, so a bare directory listing is a description of the subject.
+# Rule 2b already forbids decoding these; this closes the metadata half.
+inputs/**
+
+# ---- Run artefacts that carry description or conditioning -------------------
+# Exclusion notes say WHY a reference was dropped, which means describing it.
+intermediate/reference_exclusions.txt
+intermediate/**/reference_exclusions.txt
+
+# Training manifests carry the trigger token and per-item anchor measurements.
+intermediate/**/dataset.json
+
+# The rule-2b grant ledger names the user's files and the intervals allowed.
+intermediate/inspection_allowlist.txt
+
+# Third-party training and inference tooling echoes the resolved prompt to
+# stdout, so a run log contains the conditioning text verbatim even though no
+# script in this repo ever logs it.
+logs/*.log
+runs/**/logs/*.log
+
+# State bundles are a packed copy of the irreplaceable untracked half, which is
+# to say a copy of most of the list above.
+intermediate/state_bundles/**
+
+# A review bundle's INPUTS.txt exists to record what went into a comparison, and
+# what goes in includes the FULLY RESOLVED PROMPT - trigger substituted, grid
+# cell substituted, exactly as the sampler saw it. That is the conditioning text
+# this list denies at its source in configs/prompt.local.yaml, copied verbatim
+# into outputs/ by the thing whose job is to make results reproducible.
+#
+# Found the way these things are always found: grepping a bundle for sampler
+# settings and getting the prompt back in the same result. Nothing was wrong with
+# the bundle - a reproducibility record SHOULD carry its inputs, and the user
+# reads these. The gap was that the denylist described where the text was
+# authored and not where it was copied to.
+outputs/**/INPUTS.txt
+runs/**/outputs/**/INPUTS.txt
+
+# ---- Agent tooling ----------------------------------------------------------
+# Permission allow-lists accrete literal command lines, and those command lines
+# have carried input filenames as arguments.
+.claude/settings.local.json

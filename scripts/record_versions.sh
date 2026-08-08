@@ -72,7 +72,7 @@ echo "| \`facebook/sam2.1-hiera-large\` | full-subject mask tracking |"
 echo "| \`IDEA-Research/grounding-dino-base\` | open-vocabulary candidate detection |"
 echo "| \`openai/clip-vit-large-patch14\` | appearance / attributes ReID embedding |"
 echo "| \`depth-anything/Depth-Anything-V2-Large-hf\` | depth structural control |"
-echo "| \`insightface buffalo_l\` (ArcFace) | anchor match embedding |"
+echo "| anchor-embedding backend (bound by role) | anchor match embedding |"
 echo
 echo "## LoRAs installed in \`ComfyUI/models/loras\`"
 echo

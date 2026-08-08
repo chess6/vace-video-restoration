@@ -50,7 +50,8 @@ from common import IMAGE_EXTS, P  # noqa: E402
 
 EXCLUSIONS = "reference_exclusions.txt"
 
-# Cosine similarity on normalised ArcFace embeddings.
+# Cosine similarity on the normalised embeddings the bound anchor backend
+# returns (scripts/backends.py, role 'anchor_embed').
 SAME_ANCHOR = 0.35        # two instances are plausibly the same candidate
 DUPLICATE = 0.92        # ...and so alike they are effectively the same shot
 AMBIGUOUS = 0.28        # a second anchor this close to the target makes the image

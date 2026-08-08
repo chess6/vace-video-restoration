@@ -46,6 +46,21 @@ inputs/**
 # overlays it. Same for the LoRA trigger token, which is a name by construction.
 configs/prompt.local.yaml
 
+# ---- Backend bindings: never committed -------------------------------------
+# Which pretrained model resolves the anchor, which parser supplies the attribute
+# label map, which backend supplies structure keypoints. A model is named after
+# what it was trained to find, so publishing the name publishes the category the
+# rest of this file exists to withhold. scripts/backends.py loads these by role
+# and fails loud when a role has no safe default.
+configs/backends.local.yaml
+
+# ---- The guard's own vocabulary: never committed -----------------------------
+# check_repo_clean.sh checks 6 and 6b work from a list of forbidden words, and
+# that list is a negative image of the subject: read it and you know exactly what
+# is being protected, without needing any other file. The machinery stays tracked
+# and the words live here.
+configs/vocab.local.txt
+
 # Archives dropped anywhere in the project
 *.zip
 *.tar
@@ -92,6 +107,13 @@ logs/*
 # directories above - intermediate, outputs, reports and logs for one source
 # video - so it is denied on the same grounds, including the derived reports.
 runs/
+
+# ---- Agent tooling -----------------------------------------------------------
+# .claude/settings.json IS tracked: it carries the rule-2c deny rules and the
+# PreToolUse hook registration, and check 8 verifies a clone arrives with them.
+# settings.local.json is not. It accretes literal approved command lines, and
+# those have carried input filenames as arguments.
+.claude/settings.local.json
 
 # ---- Caches ------------------------------------------------------------------
 .cache/

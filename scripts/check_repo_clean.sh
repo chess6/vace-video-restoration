@@ -216,127 +216,122 @@ else
 fi
 
 echo
-echo "=== 6. No tracked file DESCRIBES the footage ==="
-# Rule 2a's prose clause. Checks 3 and 3b derive their words from inputs/ and so
-# catch filenames; this one catches the other half, which no amount of deriving
-# will find: a comment or doc that explains a real fix by describing what is
-# actually in the user's footage. Every word below leaked in exactly that way -
-# in a docstring, next to the code it justified, sounding like good technical
-# writing. Role words (subject, non-target, scenery, attribute, extent) are the
-# fix, and they are not in this list.
+echo "=== 6/6b. No tracked file describes the footage or names the category ==="
+# Checks 3 and 3b derive their words from the worktree and so catch FILENAMES.
+# These two catch the other half, which no amount of deriving will find: prose
+# that explains a real fix by describing what is in the footage (check 6), and
+# the weaker but far more pervasive leak of words revealing what KIND of thing
+# the subject is, even when nothing about the footage is stated (check 6b).
 #
-# Deliberately NOT listed, because in this repo they are vocabulary rather than
-# description:
-#   * dress, skirt, pants, hat, belt - the ATR segmentation model's own label
-#     set (make_reference_pack.py). Model taxonomy, not this footage.
-#   * standing, seated, walking, side view - the GENERATED candidate pose grid
-#     in generate_reference_candidates.sh spans poses on purpose.
+# WHY THE WORDS ARE NO LONGER IN THIS FILE
+# They used to be, inline, and that was itself the largest remaining breach of
+# rule 2a. A list of every word the project refuses to say is a negative image of
+# the subject: read the guard and you know exactly what it protects, with no
+# other file needed - and the guard is the one file guaranteed to be in every
+# clone. The machinery is what is worth tracking. The vocabulary is not.
 #
-# A line whose word is functional rather than descriptive may opt out with a
-# trailing  rule2a-ok  marker and a reason. One exists today: the Grounding DINO
-# detection prompt, which must name poses to detect them.
-DESCRIBE='reclin|bystander|doorway|jacket|shirt|blouse|hoodie|sweater|coat|handbag'
-hits=$(tracked | while read -r f; do
-         [ -f "$f" ] && [ "$f" != "scripts/check_repo_clean.sh" ] \
-           && grep -IHniE "$DESCRIBE" "$f" 2>/dev/null
-       done | grep -v 'rule2a-ok' || true)
-if [ -n "$hits" ]; then
-  echo "$hits" | sed 's/^/  VIOLATION: /'
-  echo "  Say it in role terms (a subject, a non-target, scenery, an attribute),"
-  echo "  or add a trailing 'rule2a-ok' marker if the word is functional."
+# So the words live in an untracked vocab file, on the rule-2c denylist, carried
+# between machines by state_bundle.sh. Its sections:
+#   [describe]       check 6  - describes THIS footage
+#   [category]       check 6b - names the subject's category
+#   [exempt-vendor]  third-party package/model/class names; a rename breaks the call
+#   [exempt-labels]  parser label literals, quoted; indexed by string
+#   [exempt-idiom]   ordinary English colliding with the category list
+#
+# THE DEPENDENCY FLOOR is what the exempt sections encode: functional inputs
+# where rewording changes behaviour rather than wording. Prompt text is NOT on
+# it (check 7), and backend identities no longer are either - they moved to
+# their own untracked config, so the vendor section should keep shrinking. What
+# cannot leave is the lockfile and bootstrap, which must name a package to
+# install it. That residue is known and accepted; see CLAUDE.md rule 2a.
+#
+# A line whose word is functional may opt out with a trailing  rule2a-ok  marker.
+VOCABFILE=configs/vocab.local.txt
+if [ ! -f "$VOCABFILE" ]; then
+  # NOT a skip. A guard that cannot check anything must not print OK: the entire
+  # value of these two checks is that a FAILED verdict blocks a push, and
+  # "vocabulary unavailable, carrying on" is indistinguishable from "clean" to
+  # everyone downstream. Restore it from a state bundle.
+  echo "  VIOLATION: $VOCABFILE is missing, so checks 6 and 6b cannot run."
+  echo "             Restore it from a state bundle (scripts/state_bundle.sh);"
+  echo "             it is untracked by design - see CLAUDE.md rules 2a and 2c."
   rc=1
 else
-  echo "  OK: no tracked file describes the footage"
-fi
+  vocab_section() {  # $1 = section name -> fragments joined into one alternation
+    # The header pattern is anchored to a COMPLETE [name] line, not merely a
+    # leading '['. Fragments in the exempt-labels section are character classes
+    # and so begin with '[' themselves; a looser rule read every one of them as
+    # a section header and silently dropped the whole section. That produced an
+    # empty alternation, which made the combined pattern contain '||', which
+    # made grep exit 2 - and the caller's `|| true` turned that into a green OK.
+    # A guard reporting OK because its pattern was too broken to run is the
+    # worst outcome available, so both halves are now checked below.
+    awk -v want="[$1]" '
+      /^\[[a-z][a-z-]*\]$/ { inside = ($0 == want); next }
+      /^[[:space:]]*#/     { next }
+      inside && NF         { printf "%s|", $0 }
+    ' "$VOCABFILE" | sed 's/|$//'
+  }
 
-echo
-echo "=== 6b. No tracked file uses the RETIRED category vocabulary ==="
-# Check 6 catches words that describe THIS footage. This one catches the weaker
-# but more pervasive leak: words that reveal what KIND of thing the subject is,
-# even when nothing about the actual footage is stated. A tracked file may say
-# a stage matches a subject against a reference; it may not say what category
-# of thing is being matched.
-#
-# Everything below has a role word that says the same thing:
-#   subject, candidate, non-target, reference, match, attribute, appearance,
-#   anchor (and anchor region / orientation / keypoints), extent, peripheral
-#   extent, exposed region, covering, extremity, scenery.
-#
-# Three groups, all one alternation:
-#   category    what the subject IS
-#   anatomy     the parts it is made of - the commonest way the category leaks
-#               back in after a scrub, because each word sounds merely technical
-#   capture     "photograph" and friends, which say the references are pictures
-#               of a real subject, and "landmark"/"yaw", which are only ever
-#               named that for one kind of subject
-VOCAB='\b(garments?|outfits?|clothing|clothes|apparel|wardrobe|dressed|undress(ed)?|wearing|worn'
-VOCAB="$VOCAB"'|identity|identities|persons?|peoples?|humans?|strangers?|men|women|figures?'
-VOCAB="$VOCAB"'|faces?|facial|hairs?|hairstyles?|heads?|bodies|torsos?|limbs?|skin|necks?|shoulders?|waists?|chests?'
-VOCAB="$VOCAB"'|legs?|hands?|feet|foot|eyes?|eyebrows?|brow|nose|mouth|chin|ocular|sleeves?|hemlines?|collars?'
-VOCAB="$VOCAB"'|photographs?|photos?|selfies?|headshots?|landmarks?|yaw|anatomy|gender|posture)\b'
-#
-# Deliberately NOT listed, because in this repo they carry an unrelated sense far
-# more often than the anatomical one, and a check that fires constantly is a
-# check that gets ignored:
-#   arm         an experiment arm - the unit every result table is built on
-#   child       a ComfyUI dynamic-combo child input, `<parent>.<child>`
-#   individual  an adjective ("the individual variants")
-#   portrait    an image ORIENTATION (480x832), never a framing
-# If one of them ever needs to mean a part of a subject, use the role word
-# (extremity, peripheral extent) - these four are unmonitored, not permitted.
-#
-# THE DEPENDENCY FLOOR - exempt because these are functional inputs, not prose.
-# Renaming any of them changes behaviour rather than wording:
-#   * third-party package, model, class and vendor names (insightface, ArcFace,
-#     Hugging Face, sdpose_wholebody, ...)
-#   * ComfyUI node types and widget keys (draw_body, draw_face) - the node
-#     input contract; a renamed key is an unrecognised key
-#   * the ATR parser's own label literals, which are indexed by string
-#
-# PROMPT TEXT IS NO LONGER ON THIS FLOOR. It used to be, and that exemption was
-# the single largest remaining leak: the profile prompts named the subject's
-# category outright in configs/*.yaml and in every generated workflows/*.json,
-# in the clear, exempted by this very script. Prompts now live in untracked
-# configs/prompt.local.yaml (check 7 below), the tracked configs carry a
-# category-free default, and neither the YAML prompt blocks nor workflows/ is
-# skipped here any more.
-#
-# Three exemption groups, kept separate so each stays auditable.
-#
-# 1. VENDOR - third-party package, model, class and vendor names.
-EXEMPT='insightface|arcface|faceanalysis|facexlib|facebook|huggingface|hugging face'
-EXEMPT="$EXEMPT"'|sdpose|dwpose|openpose|segformer|wholebody|draw_body|draw_face|draw_hand|draw_feet|draw_head'
-#
-# 2. ATR LABELS - the SegFormer model card's id2label, verbatim and QUOTED. They
-#    are indexed by string, so a rename is a KeyError. Only the quoted forms are
-#    exempt; the same word in prose is not.
-EXEMPT="$EXEMPT"'|["'"'"'](background|hat|hair|sunglasses|upper|skirt|pants|dress|belt|left_shoe|right_shoe|face|left_leg|right_leg|left_arm|right_arm|bag|scarf)["'"'"']'
-#
-# 3. IDIOM - English that collides with the anatomy group while saying nothing
-#    about any subject. Listed here rather than dropped from VOCAB, so each word
-#    stays caught everywhere it is NOT one of these.
-#      head    `git rev-parse HEAD`, `head -1`, a header, "the head and tail"
-#      hand    "hand over", "by hand", "hands off to"
-#      human   the reviewer - this project's gates are explicitly human-gated
-#      eye     human judgement: "decide by eye", "contradicts the eye", np.eye
-EXEMPT="$EXEMPT"'|rev-parse|head -[0-9]|\| *head|HEAD\b|ahead|overhead|header|interface|head and tail'
-EXEMPT="$EXEMPT"'|hands? (over|back|off|it|the)|by hand|hand-paint|hand-author|second hand|handed'
-EXEMPT="$EXEMPT"'|human|by eye|the eye|your eye|user.s eyes|np\.eye|eyes —|eyes -'
-EXEMPT="$EXEMPT"'|rule2a-ok'
-hits=$(tracked | while read -r f; do
-         [ -f "$f" ] && [ "$f" != "scripts/check_repo_clean.sh" ] \
-           && grep -IHniE "$VOCAB" "$f" 2>/dev/null
-       done | grep -viE "$EXEMPT" || true)
-if [ -n "$hits" ]; then
-  echo "$hits" | sed 's/^/  VIOLATION: /'
-  echo "  Use a role word (subject, candidate, non-target, reference, match,"
-  echo "  attribute, appearance, anchor, extent, exposed region, covering,"
-  echo "  extremity, scenery), or add 'rule2a-ok' if it is a functional input."
-  rc=1
-else
-  echo "  OK: no tracked file names the subject's category"
-fi
+  # Every section must be present and non-empty, checked INDIVIDUALLY. Testing
+  # only the joined EXEMPT string would pass: with one section empty it is still
+  # a long non-empty string, just a malformed one.
+  vocab_missing=0
+  for sec in describe category exempt-vendor exempt-labels exempt-idiom; do
+    if [ -z "$(vocab_section "$sec")" ]; then
+      echo "  VIOLATION: section [$sec] of $VOCABFILE is missing or empty."
+      vocab_missing=1
+    fi
+  done
+  DESCRIBE=$(vocab_section describe)
+  VOCAB=$(vocab_section category)
+  EXEMPT="$(vocab_section exempt-vendor)|$(vocab_section exempt-labels)|$(vocab_section exempt-idiom)"
 
+  # And every pattern must actually compile. grep exits 2 on a bad regex, which
+  # is indistinguishable from "no matches" once a `|| true` has been applied.
+  for pat in "$DESCRIBE" "$VOCAB" "$EXEMPT"; do
+    printf '' | grep -qE "$pat" 2>/dev/null
+    if [ $? -gt 1 ]; then
+      echo "  VIOLATION: a pattern built from $VOCABFILE is not a valid regex,"
+      echo "             so checks 6 and 6b would scan nothing and report OK."
+      vocab_missing=1
+    fi
+  done
+
+  if [ $vocab_missing -eq 1 ]; then
+    rc=1
+  else
+    # Both checks still skip this script, which necessarily discusses how they
+    # work. They no longer need to skip it for containing the words themselves.
+    scan() {  # $1 = pattern, $2 = post-filter
+      tracked | while read -r f; do
+        [ -f "$f" ] && [ "$f" != "scripts/check_repo_clean.sh" ] \
+          && grep -IHniE "$1" "$f" 2>/dev/null
+      done | grep -viE "$2" || true
+    }
+
+    hits=$(scan "$DESCRIBE" 'rule2a-ok')
+    if [ -n "$hits" ]; then
+      echo "$hits" | sed 's/^/  VIOLATION (6, describes the footage): /'
+      echo "  Say it in role terms (a subject, a non-target, scenery, an attribute),"
+      echo "  or add a trailing 'rule2a-ok' marker if the word is functional."
+      rc=1
+    else
+      echo "  OK (6): no tracked file describes the footage"
+    fi
+
+    hits=$(scan "$VOCAB" "$EXEMPT")
+    if [ -n "$hits" ]; then
+      echo "$hits" | sed 's/^/  VIOLATION (6b, names the category): /'
+      echo "  Use a role word (subject, candidate, non-target, reference, match,"
+      echo "  attribute, appearance, anchor, extent, exposed region, covering,"
+      echo "  extremity, scenery), or add 'rule2a-ok' if it is a functional input."
+      rc=1
+    else
+      echo "  OK (6b): no tracked file names the subject's category"
+    fi
+  fi
+fi
 echo
 echo "=== 7. No tracked file repeats the untracked conditioning text ==="
 # Prompt text is withheld (CLAUDE.md rule 2a, docs/STATE.md) and lives only in
@@ -436,6 +431,62 @@ PYEOF
       echo "  OK: the withheld wording appears in no tracked file"
     fi
   fi
+fi
+
+echo
+echo "=== 8. The agent denylist is wired up and complete (rule 2c) ==="
+# Checks 1-7 all guard the same exit: what reaches a remote. Rule 2c guards a
+# different one - what an agent working in the worktree can read - and nothing
+# above would notice if that enforcement quietly stopped existing. It is three
+# files that have to agree, which is exactly the shape that drifts: someone adds
+# a path to the manifest and not to the settings, or edits the settings and
+# leaves the manifest behind, and the half nobody re-reads is the half that was
+# doing the protecting.
+DENYLIST=configs/agent_denylist.txt
+SETTINGS=.claude/settings.json
+HOOK=scripts/agent_guard.sh
+if [ ! -f "$DENYLIST" ]; then
+  echo "  VIOLATION: $DENYLIST is missing - rule 2c has no list to enforce"; rc=1
+elif [ ! -f "$SETTINGS" ]; then
+  echo "  VIOLATION: $SETTINGS is missing - nothing denies Read/Glob/Grep"; rc=1
+elif [ ! -f "$HOOK" ]; then
+  echo "  VIOLATION: $HOOK is missing - Bash walks around the deny rules"; rc=1
+else
+  miss=0
+  # Every manifest entry must appear in the deny rules. Compared as literal
+  # text: the settings file spells each path out, so a missing one is a real
+  # gap rather than a formatting difference.
+  while IFS= read -r pat; do
+    pat="${pat%%#*}"
+    pat="$(printf '%s' "$pat" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -z "$pat" ] && continue
+    if ! grep -qF -- "$pat" "$SETTINGS"; then
+      echo "  VIOLATION: '$pat' is on $DENYLIST but no deny rule in $SETTINGS covers it"
+      miss=1
+    fi
+  done < "$DENYLIST"
+
+  if ! grep -q 'PreToolUse' "$SETTINGS" || ! grep -qF 'agent_guard.sh' "$SETTINGS"; then
+    echo "  VIOLATION: $SETTINGS does not register $HOOK as a PreToolUse hook."
+    echo "             Read/Glob/Grep denials alone leave Bash wide open."
+    miss=1
+  fi
+  if [ ! -x "$HOOK" ]; then
+    echo "  VIOLATION: $HOOK is not executable, so the hook silently never runs"; miss=1
+  fi
+  # The three tracked pieces must actually be tracked, or a fresh clone lands
+  # with no enforcement at all and nothing says so.
+  for f in "$DENYLIST" "$SETTINGS" "$HOOK" scripts/test_agent_guard.sh; do
+    tracked | grep -qxF "$f" || { echo "  VIOLATION: $f is not tracked; a clone would arrive unprotected"; miss=1; }
+  done
+  # And the local-only files the denylist names must be ignored, since a path
+  # worth hiding from an agent is a path worth never pushing.
+  for f in configs/prompt.local.yaml configs/backends.local.yaml configs/vocab.local.txt; do
+    if ! git check-ignore -q "$f" 2>/dev/null; then
+      echo "  VIOLATION: $f is not ignored by .gitignore"; miss=1
+    fi
+  done
+  [ $miss -eq 1 ] && rc=1 || echo "  OK: manifest, deny rules and Bash hook agree"
 fi
 
 echo

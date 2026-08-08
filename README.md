@@ -58,7 +58,7 @@ inputs/references/*.jpg ──► prepare_references.py
                               ▼               ▼               ▼
                         make_depth.py   track_subject.py   (manifest)
                         Depth Anything  Grounding DINO →
-                        V2 per frame    ArcFace + CLIP ReID →
+                        V2 per frame    anchor embed + ReID  →
                                         SAM 2.1 full-subject track
                               │               │
                               └───────┬───────┘

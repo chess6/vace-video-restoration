@@ -88,19 +88,19 @@ def sharpness(im: Image.Image) -> float:
 # ---------------------------------------------------------------------------
 
 def get_anchor_app(log):
+    # Resolved by ROLE through scripts/backends.py; the binding lives in an
+    # untracked config (CLAUDE.md rules 2a, 2c). See backends.anchor_embedder.
     try:
-        from insightface.app import FaceAnalysis
+        import backends
         import onnxruntime as ort
         providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
                      if "CUDAExecutionProvider" in ort.get_available_providers()
                      else ["CPUExecutionProvider"])
-        app = FaceAnalysis(name="buffalo_l", providers=providers)
-        app.prepare(ctx_id=0 if "CUDA" in providers[0] else -1, det_size=(640, 640))
-        log.info("Anchor analysis: insightface buffalo_l (%s)", providers[0])
-        return app
+        return backends.anchor_embedder(providers=providers, log=log)
     except Exception as e:
-        log.warning("insightface unavailable (%s). Falling back to candidate-box "
-                    "heuristics only; match clustering will be skipped.", e)
+        log.warning("Anchor embedding backend unavailable (%s). Falling back to "
+                    "candidate-box heuristics only; match clustering will be "
+                    "skipped.", e)
         return None
 
 

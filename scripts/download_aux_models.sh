@@ -6,7 +6,7 @@
 #   SAM 2.1 (hiera-large)          -> full-subject mask tracking          (Phase 6)
 #   Grounding DINO (base)          -> open-vocabulary candidate detection   (Phase 6)
 #   CLIP ViT-L/14                  -> appearance / attributes ReID embedding (Phase 6)
-#   InsightAnchor buffalo_l          -> anchor match embedding            (Phase 6)
+#   anchor-embedding backend         -> anchor match embedding            (Phase 6)
 #   Depth Anything V2 (Large)      -> structural depth control           (Phase 7)
 #
 # Pinned versions are recorded in reports/versions.md by scripts/record_versions.sh
@@ -60,19 +60,22 @@ PYEOF
 [ $? -ne 0 ] && { echo "ERROR: HF prefetch failed"; exit 1; }
 
 echo
-echo "=== 3/3 Prefetching InsightAnchor buffalo_l (anchor match) ==="
-"$PY" - <<'PYEOF'
+echo "=== 3/3 Prefetching the anchor-embedding backend (anchor match) ==="
+SCRIPTS_DIR="$PROJ/scripts" "$PY" - <<'PYEOF'
 import os, sys
-os.environ.setdefault("INSIGHTFACE_HOME", os.environ.get("INSIGHTFACE_HOME", os.path.expanduser("~/.insightface")))
+# A heredoc has no __file__, so the scripts dir arrives through the environment.
+sys.path.insert(0, os.environ["SCRIPTS_DIR"])
 try:
-    from insightface.app import FaceAnalysis
-    # Downloads buffalo_l on first construction. CPU providers are fine for the
-    # prefetch; the real run selects CUDA.
-    app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-    app.prepare(ctx_id=-1, det_size=(640, 640))
-    print("[ok]  insightface buffalo_l ready")
+    import backends
+    # Which package and weights this pulls is decided by the untracked binding
+    # config, not by this script (CLAUDE.md rules 2a, 2c). The weights download
+    # on first construction; CPU providers are fine for a prefetch, the real run
+    # selects CUDA.
+    backends.env_home("anchor_embed")
+    backends.anchor_embedder(providers=["CPUExecutionProvider"])
+    print("[ok]  anchor-embedding backend ready")
 except Exception as e:
-    print(f"[WARN] insightface prefetch failed: {e}", file=sys.stderr)
+    print(f"[WARN] anchor-embedding prefetch failed: {e}", file=sys.stderr)
     print("       Anchor matching will degrade to appearance-only ReID, which still works.", file=sys.stderr)
     sys.exit(0)   # non-fatal: appearance ReID alone is a valid fallback
 PYEOF

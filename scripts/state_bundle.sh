@@ -54,6 +54,14 @@ PATHS=(
   # that reproduces a recorded number - the tracked configs carry only a
   # category-free default. Losing it with the box loses comparability.
   configs/prompt.local.yaml
+  # The other two untracked-by-design configs, for the same reason: each is
+  # small, irreplaceable, and withheld from the repo rather than absent from the
+  # project. Without the bindings file the pipeline refuses to run at all;
+  # without the vocabulary file check_repo_clean.sh refuses to certify a push.
+  # Both failures are loud, and both are pure obstruction if the file was simply
+  # left behind on a box that has since been stopped.
+  configs/backends.local.yaml
+  configs/vocab.local.txt
 )
 
 usage() { sed -n '2,30p' "$0"; exit 2; }

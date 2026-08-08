@@ -1,0 +1,69 @@
+{
+  "$comment": [
+    "Tool-level enforcement of CLAUDE.md rule 2c. Tracked on purpose, so the",
+    "protection travels with the repository and check_repo_clean.sh check 8 can",
+    "verify it is still here and still complete.",
+    "",
+    "configs/agent_denylist.txt is the source of truth for WHICH paths. Every",
+    "entry there must appear below, and check 8 fails if one does not. Do not",
+    "add a path here without adding it there, or the two lists drift and the",
+    "one nobody reads is the one that was protecting something.",
+    "",
+    "Read deny rules cover the file-reading tools. Bash routes around them",
+    "entirely - cat, head, ls, find, python3 -c - so scripts/agent_guard.sh runs",
+    "as a PreToolUse hook and blocks any command naming a denied path.",
+    "",
+    "settings.local.json is NOT tracked and is itself denied: permission",
+    "allow-lists accrete literal command lines, and those have carried input",
+    "filenames as arguments."
+  ],
+  "permissions": {
+    "deny": [
+      "Read(./configs/prompt.local.yaml)",
+      "Read(./configs/backends.local.yaml)",
+      "Read(./configs/vocab.local.txt)",
+      "Read(./inputs/**)",
+      "Read(./intermediate/reference_exclusions.txt)",
+      "Read(./intermediate/**/reference_exclusions.txt)",
+      "Read(./intermediate/**/dataset.json)",
+      "Read(./intermediate/inspection_allowlist.txt)",
+      "Read(./intermediate/state_bundles/**)",
+      "Read(./outputs/**/INPUTS.txt)",
+      "Read(./runs/**/outputs/**/INPUTS.txt)",
+      "Read(./logs/*.log)",
+      "Read(./runs/**/logs/*.log)",
+      "Read(./.claude/settings.local.json)",
+
+      "Glob(./inputs/**)",
+      "Glob(./intermediate/state_bundles/**)",
+
+      "Grep(./configs/prompt.local.yaml)",
+      "Grep(./configs/backends.local.yaml)",
+      "Grep(./configs/vocab.local.txt)",
+      "Grep(./inputs/**)",
+      "Grep(./intermediate/reference_exclusions.txt)",
+      "Grep(./intermediate/**/reference_exclusions.txt)",
+      "Grep(./intermediate/**/dataset.json)",
+      "Grep(./intermediate/inspection_allowlist.txt)",
+      "Grep(./intermediate/state_bundles/**)",
+      "Grep(./outputs/**/INPUTS.txt)",
+      "Grep(./runs/**/outputs/**/INPUTS.txt)",
+      "Grep(./logs/*.log)",
+      "Grep(./runs/**/logs/*.log)",
+      "Grep(./.claude/settings.local.json)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/agent_guard.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

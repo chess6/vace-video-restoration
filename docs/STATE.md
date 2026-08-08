@@ -2,12 +2,9 @@
 
 Durable context: what is expensive to rediscover, and the standing instructions
 that outlive a session. **Read before starting work** (CLAUDE.md rule 0).
-
-**Size limit: 200 lines / 12 KB**, enforced by `check_repo_clean.sh`; CLAUDE.md
-rule 0 says how to make room. **Rule 2a applies here** — tracked, so never name an
-input file, a candidate, or an interval/duration/resolution of the user's media.
-
----
+**Size limit: 200 lines / 12 KB**, enforced by `check_repo_clean.sh`. **Rule 2a
+applies here** — tracked, so never name an input file, a candidate, or an
+interval/duration/resolution of the user's media.
 
 ## What this pipeline is
 
@@ -19,27 +16,25 @@ order, and who owns what:
    hash. **This stage produces essentially all of the measured quality.**
 2. **Controls** (depth, pose, masks) come from the **original**, never the plate.
 3. **VACE** regenerates the subject over that preserved plate.
-4. **Compositing**: plate, generated subject, then foreground occluders preserved
-   from the original.
+4. **Compositing**: plate, generated subject, then foreground occluders from the
+   original.
 
 ## Who the target is
 
 A reference can contain more than one candidate. Match is resolved by
 `scripts/reference_match.py` and **nothing else may decide it** — tracking, pack
 selection, LoRA crops and evaluation share that one bank. Detect **every** anchor
-and candidate box per image and form consensus across anchor **instances**, never
-one largest anchor per image; the dominant match is the one supported by the most
-**distinct images**; tie the target anchor to the candidate box containing it, so
-a tracker can seed from it; **reject** an image whose anchors cannot be told
-apart, rather than guessing. Its docstring carries the reasoning in full and
-`test_reference_pack.py` enforces it.
+and candidate box per image; consensus across anchor **instances**, never one
+largest anchor per image; the dominant match is the one supported by the most
+**distinct images**; tie the target anchor to the box containing it, so a tracker
+can seed from it; **reject** an image whose anchors cannot be told apart. Its
+docstring has the reasoning; `test_reference_pack.py` enforces it.
 
 **Never use attributes-sensitive or whole-image embeddings for target match.** A
 CLIP crop embedding responds to attributes and framing and *dominated* at low
 resolution — two references of another candidate carried the selection. No
 resolvable anchor scores **zero** and flags the shot. The approval gate binds to
-the mask's content hash, so an approval never survives a re-track or a change of
-machine. Run-specific exclusions: untracked `intermediate/reference_exclusions.txt`.
+the mask's content hash, so it never survives a re-track or a change of machine.
 
 ## Authority split — the rule that keeps being violated
 
@@ -57,8 +52,8 @@ Consequences that are easy to get wrong:
 
 - `appearance_authority` is the constant `"source_frames"`. Attribute colour
   distance to the externals is a **diagnostic**, never a switch or a criterion.
-- Which references become panels is decided by **match evidence alone**:
-  consensus agreement, anchor pixel resolution, anchor orientation from keypoints.
+- Panels are chosen by **match evidence alone**: consensus agreement, anchor
+  pixel resolution, anchor orientation from keypoints.
 - `MATCH_ONLY` is the **anchor region only**. Peripheral extents are
   attribute-bearing: how much is visible is attribute coverage, so an external
   reference with different coverage instructs the model to alter the source's.
@@ -68,9 +63,9 @@ Consequences that are easy to get wrong:
   exposed anchor-region pixels only, eroded from every attribute boundary,
   required to persist across frames. The rest is black and comes from the plate.
 - **Two builders exist and the wrong one is easy to run.** `prepare_references.py`
-  (Phase 5) tiles whole references. Only `make_reference_pack.py` (5b) applies
-  the split above; `run_chunks.py` prints `Reference conditioning: global` or
-  `pack`, and **that line is the check.** Enforced by `test_reference_pack.py`.
+  (5) tiles whole references; only `make_reference_pack.py` (5b) applies the split
+  above. `run_chunks.py` prints `Reference conditioning: global` or `pack` — **that
+  line is the check** (`test_reference_pack.py`).
 
 ## What is settled at 1.3B — do not re-run these
 
@@ -81,37 +76,45 @@ through `match.resolve_targets`, never `evaluate_pilot.py`'s own bank.
   **3B aggressive is the lever and the plate to ship**: sharpness 15.2 source →
   **65.9** (3B) vs 50.3 (7B) vs 22.0 (7B at denoise 0.75 + lab — closed). A
   `background` key names the **profile, not the model**: one key holds either's.
-- **In the pixels VACE regenerates it is below a plain Lanczos upscale**: on the
-  3B plate, baseline 9.7, plate 16.5, VACE 8.0 / 8.4 / 7.2 (14B). Measure
-  **in-mask, never the bounding box** — the box is 20x the submask and reports
-  +120%, the plate read back as VACE's (`scripts/compare_720p.py`).
+- Measure **in-mask, never the bounding box** — the box is 20x the submask and
+  reports +120%, the plate read back as VACE's (`scripts/compare_720p.py`).
 - **Sharpness and chroma point opposite ways**: the plate is sharpest and
   noisiest (+36%), the LoRA arm cleanest (−12%). Report both, or the metric
   contradicts the eye — it did, for a session.
 - **A subject LoRA learns the anchor and barely moves the pipeline.** 0.023 →
   **0.5167** trained (ceiling 0.7454), yet matched arms give 0.1682 vs 0.1612 and
-  0.2015 vs 0.1769 on the plate. Best VACE arm (in-mask 8.4 vs 8.0), still below a
-  plain upscale. Score only against the held-out split; the trigger is
-  load-bearing; musubi's merge trap: `prepare_musubi_dit.py`.
+  0.2015 vs 0.1769 on the plate. Score only against the held-out split; the
+  trigger is load-bearing; musubi's merge trap: `prepare_musubi_dit.py`.
 - **`model.lora` is a stack, not a slot** (`common.lora_stack`): entries chain,
   each is bind-checked separately, contents hash into `vace_key` (keys moved once).
 - Composite in `gbrp`, not `yuv420p`; after `--protected` pass `--mask` the
   submask, else the attribute arrives VAE-degraded.
 
-## Conditioning text is untracked
+## Three untracked configs, and rule 2c
 
-Prompt text works by describing the subject, so it states exactly what rule 2a
-withholds. It lives in **`configs/prompt.local.yaml`** — untracked, carried by
-`state_bundle.sh` — never in a config, workflow or script. `positive`/`negative`
-overlay every profile, and the tracked configs keep a category-free default that
-runs but **will not reproduce a recorded number**. `trigger`, `detect_prompt`,
-`probe_prompt` and `candidate_grid` have **no default and fail loud**: a silently
-generic detector prompt changes which candidate is offered, and a missing trigger
-looks exactly like a dead LoRA. A third-party LoRA's **filename** says what its
-author made it produce, so `loras:` is an overlay key too, appended to the stack.
+Anything stating the subject's **category** is withheld from the repo, not merely
+from a push. Each is untracked, carried by `state_bundle.sh`, on the denylist,
+and **fails loud** rather than defaulting — a stage run against the wrong binding
+emits plausible numbers for the wrong thing.
 
-The dependency floor is third-party names, node/widget keys and parser label
-literals only — **prompt text is not exempt**; `check_repo_clean.sh` 6b is the list.
+- **`prompt.local.yaml`** — `positive`/`negative` overlay every profile; tracked
+  configs keep a category-free default that runs but **will not reproduce a
+  recorded number**. `trigger`, `detect_prompt`, `probe_prompt`,
+  `candidate_grid`, `loras:` have no default: a generic detector prompt changes
+  which candidate is offered, a missing trigger looks like a dead LoRA.
+- **`backends.local.yaml`** — a model is named for what it was trained to find.
+  Code resolves **roles** (`anchor_embed`, `attribute_parser`) via
+  `scripts/backends.py`; label map and groups live there too.
+- **`vocab.local.txt`** — checks 6/6b's wordlist was a *negative image* of the
+  subject, in the one file every clone carries. Machinery stayed tracked.
+
+**Rule 2c**: agents may not READ `configs/agent_denylist.txt`'s entries —
+untracked ≠ unreadable, and that gap is how the category reached a conversation
+while every push check passed. `.claude/settings.json` deny rules plus
+`scripts/agent_guard.sh` (PreToolUse hook covering Bash, which otherwise walks
+around them via `cat`/`ls`/`find`); it over-blocks on purpose. Check 8 stops the
+three pieces drifting. Irreducible residue: the lockfile and `bootstrap.sh` must
+name a package to install it.
 
 ## Model facts, read from the installed source
 
@@ -161,11 +164,9 @@ Past mistakes worth not repeating — each cost a wrong conclusion:
 - **A proxy standing in for the thing itself.** CLIP distance is not a viewing
   angle (use anchor keypoints); proximity is not occlusion (verify depth order); a
   rise in high-frequency energy is not restored texture — ringing raises it too.
-  Name the measurement after what it measures.
 - **A detector's training bias read as absence.** On one shot the target scored
-  ≤0.27 against a non-target's 0.33–0.36, offering only the wrong candidate. "Found
-  something" is not "found the subject": retry lower when no candidate has match
-  evidence, and never score a subject by its extent.
+  ≤0.27 against a non-target's 0.33–0.36, offering only the wrong candidate. Retry
+  lower when no candidate has match evidence; never score a subject by its extent.
 - **A static mask is architecture, not a subject.** A bbox that barely moves has
   locked onto scenery. Correlate mask occupancy with per-pixel temporal variance:
   a scenery-locked track scored r=+0.03 against motion, a correct one +0.58.
@@ -182,16 +183,15 @@ Past mistakes worth not repeating — each cost a wrong conclusion:
 - The macOS laptop has no CUDA and the lockfile is CUDA-only: **no local pipeline
   there**, so all GPU work runs on the rented box.
 - **Take the GPU box down whenever it is not actively needed**, including while
-  the user reviews, without asking. Stop, never destroy: Vast's `/workspace` is
-  not a volume, and a stopped box cannot restart while another tenant holds the
-  GPU — RunPod's **network volume** survives that and reattaches to a new pod.
+  the user reviews, without asking. Stop, never destroy: Vast's `/workspace` is not
+  a volume, and a stopped box cannot restart while another tenant holds the GPU —
+  RunPod's **network volume** survives that, reattaching to a new pod.
 
 ## Cloud and open work
 
 `docs/`: `CLOUD_RUNBOOK.md` (quirks, allowlist, gates, teardown), `MODEL_SWAP.md` (UNet swaps), `CANDIDATE_GENERATION.md` + `LORA_TRAINING.md` (candidates).
 `scripts/state_bundle.sh` carries the irreplaceable half off a box; run it FIRST.
-Dilation is not free: `mask.grow=4` put 4.51% of the mask onto another candidate —
-rely on the occluder layer instead.
+Dilation is not free: `mask.grow=4` put 4.51% of the mask onto another candidate — rely on the occluder layer instead.
 
 **VACE-14B is tested and it is worse**: in-mask 7.2 against 1.3B's 8.0, the LoRA's
 8.4, the plate's 16.5 and a plain upscale's 9.7. fp16 fits one 80 GB card (peak

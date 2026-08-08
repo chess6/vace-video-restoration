@@ -35,13 +35,17 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import backends  # noqa: E402
 from common import (  # noqa: E402
     P, load_config, load_manifest, pilot_chunks, probe_frames, rel,
     save_manifest, setup_logging,
 )
 
-# SegFormer attributes classes that indicate a CANDIDATE (any candidate, not only ours).
-CANDIDATE_IDS = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
+# Every parser class except background indicates a CANDIDATE (any candidate,
+# not only ours). Derived from the bound label map rather than written out:
+# the ids are stable but enumerating the labels names the subject's category,
+# and a hardcoded range silently goes wrong if the binding ever changes.
+CANDIDATE_IDS = {i for i in backends.attribute_labels() if i != 0}
 
 # Depth Anything returns relative INVERSE depth, normalised per shot by
 # make_depth.py, so a brighter pixel is a NEARER one. Everything below depends on

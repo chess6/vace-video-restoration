@@ -33,12 +33,13 @@ the choice. Its job was to stop two appearances being combined in one conditioni
 image, and there is no longer an appearance in an external panel to conflict - so
 restricting panels to a single cluster would only discard viewing angles.
 
-Clustering is automatic (CLIP appearance embeddings + attribute histograms), and
-so is attribute parsing (SegFormer). No manual labelling anywhere.
+Clustering is automatic (appearance embeddings + attribute histograms), and so
+is attribute parsing. No manual labelling anywhere.
 
-The parser's label strings below are its own, read from the model card's id2label
-and indexed by string, so they stay verbatim (the dependency floor of rule 2a).
-Everything built ON them - set names, record keys, prose - uses role words.
+The parser, its revision and its label map are resolved by ROLE through
+backends.py and live in an untracked config: a segmentation model is named for
+the class of thing it parses, and its labels enumerate that class's parts.
+Everything built on them - set names, record keys, prose - uses role words.
 
 720p references are treated as adequate and are NOT upscaled to reach 1080p:
 resampling adds no information and softens the very detail they are here for.
@@ -55,22 +56,26 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import backends  # noqa: E402
 from common import (  # noqa: E402
     IMAGE_EXTS, P, geometry_key, load_config, load_manifest, pilot_chunks, rel,
     save_manifest, setup_logging,
 )
 
-SEGFORMER_ID = "mattmdjaga/segformer_b2_clothes"
-SEGFORMER_REV = "584abc1e1d26"
+# The attribute parser is resolved by ROLE, not named here. Its id, revision and
+# label map live in an untracked config (CLAUDE.md rules 2a and 2c): the model is
+# named for the class of thing it segments, and its label map enumerates the
+# parts that class has, so both stated the subject's category outright in a file
+# every clone carries. backends.py fails loud if the binding is absent - it does
+# not substitute a parser, because a different label map silently remaps every
+# region this stage reasons about.
+_PARSER = backends.binding("attribute_parser")
+SEGFORMER_ID = _PARSER["id"]
+SEGFORMER_REV = _PARSER["revision"]
 
-# SegFormer attributes label map (from the model card's id2label).
-LBL = {0: "background", 1: "hat", 2: "hair", 3: "sunglasses", 4: "upper",
-       5: "skirt", 6: "pants", 7: "dress", 8: "belt", 9: "left_shoe",
-       10: "right_shoe", 11: "face", 12: "left_leg", 13: "right_leg",
-       14: "left_arm", 15: "right_arm", 16: "bag", 17: "scarf"}
-ATTRIBUTE = {"hat", "upper", "skirt", "pants", "dress", "belt", "left_shoe",
-           "right_shoe", "bag", "scarf"}
-EXPOSED = {"face", "left_leg", "right_leg", "left_arm", "right_arm"}
+LBL = backends.attribute_labels()
+ATTRIBUTE = backends.label_group("attribute")
+EXPOSED = backends.label_group("exposed")
 # What an EXTERNAL reference is allowed to condition.
 #
 # Narrowed to the anchor region only. The peripheral extents were in this set on
@@ -81,14 +86,14 @@ EXPOSED = {"face", "left_leg", "right_leg", "left_arm", "right_arm"}
 # belongs to the source, exactly like the attribute itself.
 #
 # Accessory classes stay out too - they are attributes of another day.
-MATCH_ONLY = {"hair", "face"}
+MATCH_ONLY = backends.label_group("match_only")
 
 # The anchor region's classes, used to ask what the SOURCE actually exposes before
 # any external anchor is allowed to condition anything. A covering in the source is
 # part of the attribute the candidate presents; an external reference showing it
 # uncovered must never be read as permission to remove it.
-ANCHOR_REGION = {"hair", "face", "hat", "sunglasses", "scarf"}
-COVERING = {"hat", "sunglasses", "scarf"}
+ANCHOR_REGION = backends.label_group("anchor_region")
+COVERING = backends.label_group("covering")
 
 
 def match_regions(labels: np.ndarray, allowed: set | None = None,
@@ -179,14 +184,14 @@ def build_panel_images(anchor_panel: dict, source_crop, alt_panel: dict | None,
 
 
 class Parser:
-    """SegFormer attributes parsing, loaded once."""
+    """Attribute parsing, loaded once."""
 
     def __init__(self, log):
         import torch
         from transformers import SegformerImageProcessor, AutoModelForSemanticSegmentation
         self.torch = torch
         self.dev = "cuda" if torch.cuda.is_available() else "cpu"
-        log.info("Loading attributes parser %s", SEGFORMER_ID)
+        log.info("Loading attribute parser")
         self.proc = SegformerImageProcessor.from_pretrained(
             SEGFORMER_ID, revision=SEGFORMER_REV)
         self.model = AutoModelForSemanticSegmentation.from_pretrained(

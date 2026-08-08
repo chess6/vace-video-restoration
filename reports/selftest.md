@@ -57,7 +57,7 @@ Proven by this run:
 
 **Not** proven by this run, and only testable with your real footage:
 
-- match matching quality (Grounding DINO + ArcFace + CLIP ReID).
+- match matching quality (detector + anchor embedding + appearance ReID).
   A synthetic humanoid is not a candidate; this run seeds SAM 2 manually.
 - restoration quality: whether VACE preserves your subject's anchor,
   attributes and proportions convincingly. That is what the real pilot

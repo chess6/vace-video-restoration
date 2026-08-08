@@ -150,6 +150,43 @@ file become a grant for the file.
 Rule 1 is never relaxed by such a grant. Frames go to disk and stay there.
 Inspecting is not displaying.
 
+## 2c. An agent may not read the denylisted paths
+
+Rules 2a and 2b guard two exits: what reaches a remote, and what the agent
+decodes. They left a third wide open, and it is the one that was actually used.
+A file can be untracked, unpushable, never decoded — and still be the thing that
+tells an agent exactly what the subject is. It only has to sit in the working
+tree where a `Read` or a `cat` reaches it. Every push check passed the whole
+time; the leak went into a conversation, not into a commit.
+
+**`configs/agent_denylist.txt` is the list.** It is not `.gitignore` and it is
+strictly larger: `.gitignore` answers *may this reach a remote*, the denylist
+answers *may an agent read this*. It covers the conditioning overlay, the
+backend bindings, the guard's own vocabulary, everything under `inputs/`
+(including the **filenames** — reference files are named for what they show, so
+a bare `ls` is a description), the exclusion notes, training manifests, the
+rule-2b grant ledger, run logs, state bundles, and the permission allow-list.
+
+Enforcement is at the tool boundary, not on your good intentions:
+
+- `.claude/settings.json` denies `Read`/`Glob`/`Grep` on every entry.
+- `scripts/agent_guard.sh` is a `PreToolUse` hook covering **Bash**, which
+  otherwise walks straight around those rules via `cat`, `ls`, `find` or
+  `python3 -c`. It matches the path anywhere in the command and errs toward
+  refusing; `scripts/test_agent_guard.sh` pins the behaviour.
+- `check_repo_clean.sh` check 8 fails if the two drift out of sync with the list.
+
+**The pipeline still reads all of it** — `scripts/*.py` must, or nothing runs.
+The block binds the agent, not the filesystem, so it cannot stop a path assembled
+from variables or a wildcard that happens to expand over one. Do not go looking
+for the gap. When you need a fact from a denied file, **ask the user to run the
+command and report only the structural result** — a count, a shape, a pass/fail —
+never the content.
+
+And do not carry it forward. A category word learned in an earlier session, from
+a file now on this list, is exactly as much of a leak when you type it from
+memory as when you read it.
+
 ## 3. Never silently fall back to CPU
 
 If CUDA is unavailable, fail loudly. `common.require_cuda()` exists for this.

@@ -7,7 +7,7 @@
 # chunk assembly, audio remux and A/V sync verification.
 #
 # What it does NOT prove: match matching. A synthetic humanoid is not a candidate,
-# so Grounding DINO / ArcFace matching cannot be judged on it. That stage is
+# so detector / anchor-embedding matching cannot be judged on it. That stage is
 # exercised here with a manual seed, and is validated for real when you supply
 # actual references. This limitation is stated in the report rather than hidden.
 #
@@ -302,7 +302,7 @@ else echo "    FAIL: expected exit 3, got $rc"
   echo
   echo "**Not** proven by this run, and only testable with your real footage:"
   echo
-  echo "- match matching quality (Grounding DINO + ArcFace + CLIP ReID)."
+  echo "- match matching quality (detector + anchor embedding + appearance ReID)."
   echo "  A synthetic humanoid is not a candidate; this run seeds SAM 2 manually."
   echo "- restoration quality: whether VACE preserves your subject's anchor,"
   echo "  attributes and proportions convincingly. That is what the real pilot"

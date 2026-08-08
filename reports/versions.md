@@ -56,7 +56,7 @@ Full checksums are re-verified on every run of `scripts/download_models.sh`.
 | `IDEA-Research/grounding-dino-base` | open-vocabulary candidate detection |
 | `openai/clip-vit-large-patch14` | appearance / attributes ReID embedding |
 | `depth-anything/Depth-Anything-V2-Large-hf` | depth structural control |
-| `insightface buffalo_l` (ArcFace) | anchor match embedding |
+| anchor-embedding backend (bound by role) | anchor match embedding |
 
 ## Subject-LoRA training (musubi-tuner)
 

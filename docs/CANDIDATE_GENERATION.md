@@ -131,7 +131,7 @@ while the thing being measured changes.
 
 Two independent measurements. Neither alone is sufficient.
 
-**Match** — `score_lora_match.py`, insightface + Grounding DINO, scored
+**Match** — `score_lora_match.py`, the bound anchor backend + a detector, scored
 against the **held-out split only**. Scoring against training material returns a
 high number by construction. Report **per candidate**, not group medians.
 
@@ -149,6 +149,100 @@ correctly proportioned subject scores full marks.
 **Seeds dominate arms.** Composition varies enormously by seed, and both metrics
 follow composition. Use several fixed seeds, identical across arms, or a single
 seed will yield a confident and meaningless winner.
+
+## Repairing one region
+
+`inpaint_chroma.py`, sequenced by `run_region_plan.sh`. For the case where an
+image is right everywhere except one region, so regenerating the whole thing
+throws away more than it fixes.
+
+Crop the region with context, resample the crop **up** so the region occupies
+more of the canvas, denoise only inside a mask, resample back, composite into the
+untouched original. Enlarging the finished pixels cannot add structure that was
+never drawn — the region has to be larger *while the sampler is running*. The
+same argument drives the other half of `run_region_plan.sh`, a ladder of whole
+canvases at a fixed aspect ratio, every rung a multiple of 16 in both axes so
+nothing is silently reframed.
+
+Wiring, and why it is this and not something simpler:
+
+- Chroma is not an inpainting checkpoint, so there is no
+  `InpaintModelConditioning` path; `SetLatentNoiseMask` over an ordinary
+  `VAEEncode` is the available route. Its mask acts at **latent** resolution,
+  8× coarser than the pixels, which is exactly why the blend back into the
+  original happens in pixel space with its own feather rather than trusting the
+  sampler's edge.
+- **Two masks.** The sampler is allowed to repaint more than the composite blends
+  back, so the blend's ramp lands inside repainted pixels rather than on the
+  boundary of them. Asserted at run time, not assumed.
+- Denoise ~0.30–0.40 corrects appearance, ~0.45–0.55 corrects structure.
+- `ModelSamplingAuraFlow`, never `ModelSamplingFlux` — the latter derives its
+  shift from width and height, so on a crop's canvas it means something different
+  from what it meant on the full frame, and the repair stops being comparable
+  with the thing it repairs.
+
+Three things it measures instead of assuming:
+
+| flag | what it settles |
+|---|---|
+| `--check-nodes` | reads the node schemas off the running server and fails if any wired class or input key is absent — rule 6 in the form available to a machine with no checkout of its own. A test keeps that declared list covering what the graph actually emits, or the preflight would pass and the run fail on an undeclared key. |
+| `--verify-mask-polarity` | one image at denoise 1.0 with a white square, reporting the ratio of change inside to outside. Polarity has been assumed wrongly in this project before. |
+| `--control` | crop, resample up, resample down, composite — **no diffusion**. Whatever this arm changes, resampling changed. |
+
+Every arm then asserts that not one pixel outside the mask moved and that
+something inside it did. An exit code proves a run happened, not that it did
+anything.
+
+Sampler settings default to the **source image's own record** where it has one,
+because numbers are comparable only within one baseline; the run prints whether
+each value came from a flag, from that record, or from a tool default.
+
+### Where the region is — and why there is one box per image
+
+Read from untracked `intermediate/defect_region.txt`, in descending order of how
+much is actually known: an explicit box on the command line, a box measured for
+**that specific image**, a generic box, then a square grown around a bare point.
+The run prints which it used, because a result from a measured box is a stronger
+claim than one from a guess and nothing downstream can tell them apart otherwise.
+
+**A box does not transfer between images, and assuming it does is a real error
+rather than a pedantic one.** Composition varies enormously by seed on this
+generator — the spread across seeds within one arm measured roughly nine times
+the spread between arms — so the same coordinates land somewhere else on a
+differently framed subject. Measured per image, the boxes for three sibling
+candidates differed by up to 68 px in one axis and by a third in size, on a
+region about 60 px tall. One shared box would have been wrong on two of the
+three, and every downstream check would still have passed.
+
+So the key is the **arm directory name**: images live one directory per arm and
+the boxes are recorded per arm, so the two agree without a mapping table to fall
+out of date. `mark_region.py` exists for the reading-off step — it burns a
+labelled coordinate grid and the currently-recorded box onto a copy of each
+image, magnified with NEAREST so the resampler invents no edge, which turns
+"describe where it is" into four checkable numbers.
+
+Context is sized as a fraction of the box **per side**, and a small region needs
+proportionally *more* context, not less: at 18% a 30×50 region yields a 40×68
+crop, which is a border rather than something to reattach to. The default of 1.5
+makes the crop 4× the box in each axis, and the run warns below roughly 48
+original pixels on the short side, where the crop is mostly interpolation and the
+magnification stops buying structure and starts buying invention.
+
+### What exists, and what was lost
+
+The Chroma tools are untracked in `intermediate/tools/`, and travel by state
+bundle rather than by git. That has already cost something: **`gen_key.py`,
+`body_structure.py`, `assert_dataset.py` and `compare_arms.sh` no longer exist**
+— not in the worktree, and not on the volume, which was checked directly. This
+document still describes what they did because the design decisions are worth
+keeping; it does not describe files you can run.
+
+What replaces them, where anything does: `inpaint_chroma.py` writes its own
+content-addressed record on the same before-the-run contract, and
+`run_region_plan.sh bundle` copies `*.provenance.json` beside the images, which
+is the specific defect that lost bundle 13's per-image provenance. Nothing
+replaces the structure metrics, and on the evidence of the region defect nothing
+should without being validated against images already known to be bad first.
 
 ## Provenance
 
