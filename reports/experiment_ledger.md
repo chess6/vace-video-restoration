@@ -34,9 +34,14 @@ malformed while the subject is otherwise correct. Thirteen bundles, 150+ arms.
 
 **What is confirmed**
 
-**The base model is the failing component**, and **the subject adapter partially
-corrects the region** — the bare base, at the same seed, prompt and verified
-dtype with no adapter node in the graph, is *worse* there.
+**The base model is the failing component, and so is its sibling.** Both
+checkpoints in the family, base-only at three fixed seeds under identical
+verified conditions, fail the structural-plausibility gate — the user assessed
+all six arms as not plausible. **The subject adapter partially corrects the
+region**: the bare base is *worse* there than the adapted one.
+
+So the family has no usable prior for this structure, and adaptation is lifting
+it from a floor rather than repairing a near-miss.
 
 Those two facts together are the finding. The obvious reading of everything
 before them was "the model cannot draw this, so replace the model". That reading
@@ -52,9 +57,11 @@ ceiling is the model" and "the ceiling is the dataset", it costs no GPU, and it
 is the recommended next step. It cannot be done by inspecting the media, so it
 takes the form of a manifest the user reviews.
 
-**A base-model bakeoff is not indicated.** It would discard the one component
-shown to help and require rebuilding subject adaptation on a new stack before the
-region could even be assessed.
+**The untested arm is now the decisive one.** The gate covered the current base
+and one same-family sibling; the slot for a genuinely different architecture, or
+a model *trained* to complete masked regions from context, was never filled -
+one download is licence-gated and the other was fetched but not wired up. With
+the family excluded, that arm is the remaining question rather than a fallback.
 
 ### Method notes, which cost more than the results did
 
@@ -102,7 +109,7 @@ most of the investigation.
 | 18 | seed_precision | 6 seeds × 2 declared dtypes | baseline B | 12 | **no seed renders it cleanly**; dtypes since **verified** (20) |
 | 19 | region_repair | denoise 0.30–0.55 × 2 seeds × 3 images | measured box per image | 33 | **local repair fails** |
 | 20 | dtype_verified | declared dtype, then adapter present/absent | seed, prompt digests, verified dtype | 3 | **precision excluded**; **base-only is WORSE** |
-| 21 | capability_gate | checkpoint: current base vs same-family sibling | 3 seeds, prompt digests, verified bf16, no adapter | 6 | **awaiting user assessment**; arms differ by mean 51.6–63.5 |
+| 21 | capability_gate | checkpoint: current base vs same-family sibling | 3 seeds, prompt digests, verified bf16, no adapter | 6 | **BOTH FAIL, all 3 seeds.** The family shares the limitation |
 
 Baseline A and baseline B differ in resolution, cfg and flow shift; rows are only
 comparable inside one of them.
@@ -184,7 +191,7 @@ Which of the four candidate causes owns this failure:
 |---|---|
 | Quantisation | **EXCLUDED, on a measurement.** Bundle 20. |
 | The current subject adapter | **REFUTED as a cause. It partially FIXES the region.** |
-| Base-model capability | **CONFIRMED as the failing component.** |
+| Base-model capability | **CONFIRMED, and it is the FAMILY, not one checkpoint** (21). |
 | Absent training evidence | **Open, never audited — and now the indicated lever.** |
 
 ### The decision, and what changed it

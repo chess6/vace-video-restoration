@@ -206,13 +206,13 @@ evidence: prompt interference, the VAE (~44 dB), the seed across 12
 images, and **local repair at 16× the area with composition pinned** (33 arms,
 none helped, edge energy fell in all 30).
 
-**Precision is EXCLUDED on a measurement** (bundle 20): declared `default` loads
-100% bfloat16, `fp8_e4m3fn` 100% float8, and regenerating at `default` reproduced
-bundle 18 bit-for-bit. **Probe the loaded model; never trust a directory name or
-a loader argument.** **THE ADAPTER PARTIALLY FIXES THE REGION** — base-only at
-the same seed, prompt and verified dtype is *worse* there — so aggravation is
-refuted, the base is the failing component, and adaptation is the only lever
-shown to move it. That points at the dataset, not at a model swap.
+**Precision is EXCLUDED on a measurement** (20): `default` loads 100% bfloat16,
+`fp8_e4m3fn` 100% float8, and regenerating at `default` reproduced bundle 18
+bit-for-bit. **Probe the loaded model; never trust a name or a loader flag.** **THE ADAPTER PARTIALLY FIXES THE REGION** — base-only is
+*worse* there — but **the base and its same-family sibling BOTH fail a base-only
+structural gate** (21, 3 seeds, verified bf16). The family has no usable prior
+here; adaptation lifts off a floor rather than repairing a near-miss. Decisive
+and untested: a different architecture, or a model trained to fill from context.
 
 Never audited: whether training material holds usable evidence of the region
 *after* trainer resize and crop — until it does, "cannot draw it" and "was never
